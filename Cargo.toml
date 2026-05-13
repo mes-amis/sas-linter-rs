@@ -1,0 +1,41 @@
+[package]
+name = "sas-linter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "AGPL-3.0-or-later"
+description = "Configurable lint engine for SAS source files."
+repository = "https://github.com/mes-amis/sas-linter"
+readme = "README.md"
+keywords = ["sas", "linter", "lint", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+default-run = "sas-lint"
+
+[[bin]]
+name = "sas-lint"
+path = "src/main.rs"
+
+[lib]
+name = "sas_linter"
+path = "src/lib.rs"
+
+[dependencies]
+sas-lexer = "=1.0.0-beta.4"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "1"
+encoding_rs = "0.8"
+csv = "1"
+regex = "1"
+once_cell = "1"
+
+[dev-dependencies]
+serde_yaml = "0.9"
+
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
