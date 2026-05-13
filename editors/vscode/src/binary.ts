@@ -10,7 +10,7 @@ import * as vscode from "vscode";
  *
  *   github.com/mes-amis/sas-linter-rs/releases/download/<TAG>/sas-lint-<TAG>-<TARGET>
  */
-const BINARY_VERSION = "v0.1.0";
+const BINARY_VERSION = "v0.2.1";
 const RELEASE_REPO = "mes-amis/sas-linter-rs";
 
 type Target =
