@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 
-use sas_linter::{rules, Config, Linter};
+use sas_linter::{rules, Config, Formatter, Linter};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -72,8 +72,24 @@ fn run() -> Result<ExitCode> {
     }
 
     if cli.format {
-        eprintln!("sas-lint: --format is not yet implemented in the Rust port");
-        return Ok(ExitCode::from(2));
+        let cfg = Config::load(&cli.config)?;
+        let formatter = Formatter::from_config(&cfg)?;
+        let linter = if let Some(ids) = &cli.rules {
+            Linter::from_ids(ids)?
+        } else {
+            Linter::from_config(&cfg)?
+        };
+
+        let mut exit_code: u8 = 0;
+        for path in &cli.files {
+            if !path.is_file() {
+                eprintln!("sas-lint: {}: not a regular file", path.display());
+                exit_code = exit_code.max(2);
+                continue;
+            }
+            linter.format_file(path, &formatter)?;
+        }
+        return Ok(ExitCode::from(exit_code));
     }
 
     let linter = if let Some(ids) = &cli.rules {

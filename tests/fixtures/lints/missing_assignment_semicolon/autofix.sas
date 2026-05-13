@@ -1,5 +1,5 @@
 data foo;
    set bar;
-   B1 = B1     **  Comatose;
+   Q1 = Q1     **  Comatose;
    X  = X **  Estimated Survival;
 run;

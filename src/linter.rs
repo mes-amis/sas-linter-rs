@@ -77,4 +77,28 @@ impl Linter {
         }
         Ok(findings)
     }
+
+    /// Run the formatter against a file, then apply any autofix-enabled
+    /// rules. Mirrors the Ruby gem's `format_file`: formatter passes
+    /// first, then composable rule autofixes, and the file is only
+    /// rewritten if a byte changed. Returns true when the file was
+    /// rewritten.
+    pub fn format_file(
+        &self,
+        path: &Path,
+        formatter: &crate::formatter::Formatter,
+    ) -> Result<bool> {
+        let original = encoding::read_source(path)?;
+        let mut modified = formatter.format(&original);
+        for rule in &self.rules {
+            if rule.autofix_enabled() && rule.supports_autofix() {
+                modified = rule.autofix(&modified);
+            }
+        }
+        if modified.as_bytes() == original.as_bytes() {
+            return Ok(false);
+        }
+        std::fs::write(path, modified.as_bytes())?;
+        Ok(true)
+    }
 }

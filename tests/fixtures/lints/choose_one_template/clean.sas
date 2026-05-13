@@ -1,5 +1,5 @@
 ** A regular SAS line comment that doesn't trigger the rule  **;
-if A1 in (0,1,2,3) and A4 in (0,1) then do;
+if R1 in (0,1,2,3) and R3 in (0,1) then do;
    xOut = 0;
 end;
 run;
