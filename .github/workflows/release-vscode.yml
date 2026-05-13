@@ -1,0 +1,33 @@
+name: Release VSCode Extension
+
+on:
+  push:
+    tags:
+      - "vscode-v[0-9]*"
+
+jobs:
+  publish:
+    name: package and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install deps
+        run: npm ci
+      - name: Package
+        run: npx vsce package --skip-license
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: VSCode extension ${{ github.ref_name }}
+          files: editors/vscode/*.vsix
+          generate_release_notes: true
