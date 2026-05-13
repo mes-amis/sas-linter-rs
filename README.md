@@ -40,16 +40,18 @@ Rust 1.82+ required.
 
 ### VSCode extension
 
-A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases).
+A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
 ```sh
-# Install from the command line:
-curl -fsSL -o sas-linter-vscode.vsix \
-  https://github.com/mes-amis/sas-linter-rs/releases/latest/download/sas-linter-vscode-<VERSION>.vsix
-code --install-extension sas-linter-vscode.vsix
+# Install from the command line (substitute the current vscode-v* tag and matching version):
+TAG=vscode-v0.2.1
+VER=0.2.1
+curl -fsSL -o /tmp/sas-linter-vscode.vsix \
+  "https://github.com/mes-amis/sas-linter-rs/releases/download/${TAG}/sas-linter-vscode-${VER}.vsix"
+code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
-Or grab the `.vsix` from the [release page](https://github.com/mes-amis/sas-linter-rs/releases) and drag it into the VSCode Extensions view → `…` → "Install from VSIX…".
+Or grab the `.vsix` from the [release page](https://github.com/mes-amis/sas-linter-rs/releases) (filter by `vscode-v*` tags) and drag it into the VSCode Extensions view → `…` → "Install from VSIX…".
 
 On first activation the extension auto-downloads the matching `sas-lint` binary from the GitHub release for your platform and caches it under VSCode's global storage. Override with the `sasLinter.path` setting to point at a local build instead — useful while iterating on rules.
 
