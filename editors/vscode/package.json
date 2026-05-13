@@ -1,0 +1,96 @@
+{
+  "name": "sas-linter-vscode",
+  "displayName": "SAS Linter",
+  "description": "Lint and format SAS source files via the sas-lint binary.",
+  "version": "0.1.0",
+  "publisher": "mes-amis",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mes-amis/sas-linter-rs",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Formatters"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:sas"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "sas",
+        "aliases": [
+          "SAS",
+          "sas"
+        ],
+        "extensions": [
+          ".sas"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "sasLinter.lintFile",
+        "title": "SAS Linter: Lint current file"
+      },
+      {
+        "command": "sasLinter.fixAll",
+        "title": "SAS Linter: Run all autofixes on current file"
+      },
+      {
+        "command": "sasLinter.downloadBinary",
+        "title": "SAS Linter: Download / update sas-lint binary"
+      }
+    ],
+    "configuration": {
+      "title": "SAS Linter",
+      "properties": {
+        "sasLinter.path": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the sas-lint binary. Leave blank to use the bundled auto-downloaded binary."
+        },
+        "sasLinter.config": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a sas-linter YAML config (relative to the workspace root, or absolute). Leave blank for sas-lint's default search."
+        },
+        "sasLinter.run": {
+          "type": "string",
+          "enum": [
+            "onSave",
+            "onType",
+            "manual"
+          ],
+          "default": "onSave",
+          "description": "When to run the linter."
+        },
+        "sasLinter.format.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Register sas-lint --format as the document formatter for SAS files."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --platform=node --target=node18 --external:vscode --format=cjs --minify",
+    "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --platform=node --target=node18 --external:vscode --format=cjs --sourcemap",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --platform=node --target=node18 --external:vscode --format=cjs --sourcemap --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
+  }
+}
