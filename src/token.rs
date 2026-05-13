@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+
+use once_cell::sync::Lazy;
+use regex::Regex;
 use sas_lexer::{lex_program, TokenChannel, TokenType};
 
 /// Flattened token record matching the shape the Ruby gem exposed via FFI.
@@ -88,12 +92,62 @@ impl TokenStream {
             });
         }
 
+        // Lines like `**  text **;` are a project-level "visual comment"
+        // idiom. SAS itself terminates `*…;` at the first `;`, so prose with
+        // embedded `;` (e.g. revision dates `01/01/00;`) ends the comment
+        // early and the remainder of the line lexes as code. Treat any line
+        // that opens with `**` and closes with `**;` as a comment for
+        // analysis purposes, regardless of internal semicolons.
+        let visual_lines = visual_comment_lines(source);
+
         let default: Vec<Token> = all
             .iter()
             .filter(|t| !matches!(t.channel, TokenChannel::HIDDEN | TokenChannel::COMMENT))
+            .filter(|t| !visual_lines.contains(&t.start_line))
             .cloned()
             .collect();
 
         TokenStream { default, all }
+    }
+}
+
+static VISUAL_COMMENT_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*\*\*.*\*\*;\s*$").unwrap());
+
+fn visual_comment_lines(source: &str) -> HashSet<u32> {
+    let mut set = HashSet::new();
+    for (idx, line) in source.lines().enumerate() {
+        if VISUAL_COMMENT_LINE.is_match(line) {
+            set.insert((idx + 1) as u32);
+        }
+    }
+    set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_visual_comment_lines() {
+        let src = "data foo;\n\
+                   **  REVISION DATES:   01/01/00; 02/02/01 **;\n\
+                   **  ALGORITHM: splits sample by A, then B **;\n\
+                   x = 1;\n\
+                   **A**; **B**;\n";
+        let lines = visual_comment_lines(src);
+        assert!(lines.contains(&2));
+        assert!(lines.contains(&3));
+        assert!(lines.contains(&5));
+        assert!(!lines.contains(&1));
+        assert!(!lines.contains(&4));
+    }
+
+    #[test]
+    fn ignores_partial_visual_comment_lines() {
+        let src = "** comment **; data foo;\n\
+                   **; trailing\n\
+                   * single-star comment;\n";
+        let lines = visual_comment_lines(src);
+        assert!(lines.is_empty());
     }
 }
