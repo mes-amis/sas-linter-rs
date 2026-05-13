@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships ~17 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent). Targets Rust 1.82+.
+Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships ~18 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent). Targets Rust 1.82+.
 
 ## Commands
 

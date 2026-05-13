@@ -137,6 +137,18 @@ rules:
     name_match: case_insensitive        # case_insensitive | exact
     delimiter: ","                      # CSV column separator: "," | ";" | "\t"
 
+  invalid_conventional_variable:
+    enabled: true
+    pattern: '^[A-Z]+_\d+$'             # required regex; rule is a no-op when omitted
+    csv_paths:                          # catalog files; empty list = rule is a no-op
+      - metadata/known-variables.csv
+    name_column: "Name"                 # default
+    name_match: case_insensitive        # case_insensitive | exact
+    delimiter: ","                      # CSV column separator: "," | ";" | "\t"
+    allow_list:                         # strings = literal match, /…/ = regex
+      - ABC_99
+      - '/^ABC_\d+_[a-z]$/'
+
   # ── Source-hygiene rules (all support autofix) ──────────────────────
   trailing_whitespace:
     enabled: true
@@ -225,6 +237,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string. Autofix inserts the `=`. |
 | `invalid_numeric_literal` | INTEGER_LITERAL tokens whose text isn't actually a valid SAS numeric literal (e.g. `1f`, `1d2`). |
 | `variable_value_out_of_known_range` | `if VAR = N` / `if VAR in (...)` literals fall outside the variable's documented acceptable values. Loads the catalog from one or more CSVs with configurable column names and column separator (`,`, `;`, tab). |
+| `invalid_conventional_variable` | Identifier matches a configured naming convention regex but isn't in the catalog. Reports the closest Levenshtein matches as "did you mean?" hints. `allow_list` entries are matched literally; entries wrapped in `/.../` are matched as regexes. No-op until both `pattern` and `csv_paths` are configured. |
 | `inconsistent_variable_case` | Identifier appears with more than one casing in the same file (`myVar` vs `MyVar`). SAS treats both as the same variable; autofix rewrites every minority spelling to the most-common form. Skips proc-format definitions and `format.` / `lib.member` references. |
 | `format_for_unknown_variable` | `format` / `informat` / `attrib` statement assigns a format to a variable that's referenced nowhere else in the file — almost always a typo. Skipped on files that pull in columns via `set` / `merge` / `update` / `infile` / `input`. |
 

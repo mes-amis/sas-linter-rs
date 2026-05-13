@@ -9,6 +9,7 @@ pub mod encoding_issues;
 pub mod format_for_unknown_variable;
 pub mod identical_if_else_branches;
 pub mod inconsistent_variable_case;
+pub mod invalid_conventional_variable;
 pub mod invalid_numeric_literal;
 pub mod line_endings;
 pub mod malformed_if_condition;
@@ -47,6 +48,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         missing_assignment_semicolon::meta(),
         malformed_label_statement::meta(),
         variable_value_out_of_known_range::meta(),
+        invalid_conventional_variable::meta(),
         invalid_numeric_literal::meta(),
         inconsistent_variable_case::meta(),
         format_for_unknown_variable::meta(),
