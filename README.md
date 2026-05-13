@@ -38,6 +38,30 @@ cargo build --release
 
 Rust 1.82+ required.
 
+### VSCode extension
+
+A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases).
+
+```sh
+# Install from the command line:
+curl -fsSL -o sas-linter-vscode.vsix \
+  https://github.com/mes-amis/sas-linter-rs/releases/latest/download/sas-linter-vscode-<VERSION>.vsix
+code --install-extension sas-linter-vscode.vsix
+```
+
+Or grab the `.vsix` from the [release page](https://github.com/mes-amis/sas-linter-rs/releases) and drag it into the VSCode Extensions view → `…` → "Install from VSIX…".
+
+On first activation the extension auto-downloads the matching `sas-lint` binary from the GitHub release for your platform and caches it under VSCode's global storage. Override with the `sasLinter.path` setting to point at a local build instead — useful while iterating on rules.
+
+Features:
+
+- diagnostics on save (`onSave` / `onType` / `manual`, configurable)
+- `Format Document` runs `sas-lint --format`
+- per-rule Quick Fix code actions for autofix-capable rules
+- command palette: `SAS Linter: Lint current file`, `… Run all autofixes on current file`, `… Download / update sas-lint binary`
+
+See [`editors/vscode/README.md`](editors/vscode/README.md) for settings reference and development setup.
+
 ## CLI usage
 
 ```sh
