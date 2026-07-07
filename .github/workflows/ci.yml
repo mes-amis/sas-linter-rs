@@ -23,3 +23,31 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --all
+
+  tag:
+    name: tag release
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag new version and trigger release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          tag="v${version}"
+          if git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; nothing to release"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "${tag}"
+          git push origin "${tag}"
+          # Tags pushed with GITHUB_TOKEN don't fire on:push workflows,
+          # so dispatch the release workflow directly at the tag ref.
+          gh workflow run release.yml --ref "${tag}"
