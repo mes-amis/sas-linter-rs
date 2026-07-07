@@ -1,6 +1,6 @@
 # sas-linter (Rust)
 
-A configurable lint engine for SAS source files. Single-binary Rust port of the [Ruby `sas-linter` gem](https://github.com/mes-amis/sas-linter), built on Misha Perlov's [`sas-lexer`](https://github.com/mishamsk/sas-lexer) crate. Ships seventeen pluggable rules covering structural defects, cosmetic issues, and source-header conventions, plus a `--format` mode that handles keyword casing, operator spacing, and indentation.
+A configurable lint engine for SAS source files. Single-binary Rust port of the [Ruby `sas-linter` gem](https://github.com/mes-amis/sas-linter), built on Misha Perlov's [`sas-lexer`](https://github.com/mishamsk/sas-lexer) crate. Ships seventeen pluggable rules covering structural defects, cosmetic issues, and source-header conventions, plus a `--format` mode that handles keyword casing, operator spacing, indentation, banner-comment alignment, and assignment alignment.
 
 No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for your platform and run it.
 
@@ -85,6 +85,11 @@ sas-lint --no-autofix src/*.sas
 # Reformat files in place: keyword casing + operator spacing + indentation,
 # plus any autofix-enabled rules
 sas-lint --format --config my-lint.yaml src/*.sas
+
+# --format also realigns banner comment boxes (`**  ...  **;` preambles)
+# and runs of `var = expr; **note;` assignments by default — no config
+# needed, in the spirit of `terraform fmt`
+sas-lint --format legacy/*.sas
 ```
 
 Exit codes: `0` clean, `1` findings, `2` invalid args.
@@ -181,6 +186,10 @@ format:
   keywords: preserve           # preserve | upper | lower
   operator_spacing: true       # normalize spaces around binary operators and after commas
   indent_width: 2              # indentation width; 0 or omit to disable
+  align_comment_banners: true  # realign `**  ...  **;` banner boxes: columns split on 2+ spaces,
+                               # uniform `**;` terminator width, borders/dividers stretched to match,
+                               # off-by-one row indents snapped, stacked `**..**; **..**;` lines split
+  align_assignments: true      # align `=` and trailing comments across runs of simple assignments
 ```
 
 `enabled` and `autofix` are accepted on every rule. Options not listed above are ignored.

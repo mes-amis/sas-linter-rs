@@ -17,6 +17,47 @@ fn preserve_is_noop() {
 }
 
 #[test]
+fn banner_alignment_is_on_by_default() {
+    let f = fmt_from_yaml("");
+    let src = "\
+**  PROGRAM:      FOO.txt   **;\n\
+**  BY:   ALICE                    **;\n";
+    let out = f.format(src);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0].len(), lines[1].len(), "got:\n{out}");
+    assert!(lines[0].contains("PROGRAM:  FOO.txt"), "got:\n{out}");
+    assert!(lines[1].contains("BY:       ALICE"), "got:\n{out}");
+}
+
+#[test]
+fn assignment_alignment_is_on_by_default() {
+    let f = fmt_from_yaml("");
+    let src = "a    =    a;  **first;\n\nlonger  =  longer; **second;\n";
+    let out = f.format(src);
+    assert_eq!(
+        out,
+        "a      = a;       **first;\n\nlonger = longer;  **second;\n"
+    );
+}
+
+#[test]
+fn alignment_passes_can_be_disabled() {
+    let f = fmt_from_yaml(
+        r#"
+format:
+  align_comment_banners: false
+  align_assignments: false
+"#,
+    );
+    let src = "\
+**  PROGRAM:      FOO.txt   **;\n\
+**  BY:   ALICE                    **;\n\
+a    =    a;  **first;\n\
+longer  =  longer; **second;\n";
+    assert_eq!(f.format(src), src);
+}
+
+#[test]
 fn keywords_upper_uppercases_keywords_only() {
     let f = fmt_from_yaml(
         r#"
