@@ -14,6 +14,8 @@ use std::path::Path;
 ///     keywords: preserve | upper | lower
 ///     operator_spacing: true | false
 ///     indent_width: 2
+///     align_comment_banners: true | false   # default: true
+///     align_assignments: true | false       # default: true
 ///
 /// Rules omitted from the config default to enabled with no options, so
 /// adding a new rule never silently disables it for existing users — same
@@ -34,6 +36,10 @@ pub struct FormatConfig {
     pub operator_spacing: Option<bool>,
     #[serde(default)]
     pub indent_width: Option<i64>,
+    #[serde(default)]
+    pub align_comment_banners: Option<bool>,
+    #[serde(default)]
+    pub align_assignments: Option<bool>,
 }
 
 impl Config {

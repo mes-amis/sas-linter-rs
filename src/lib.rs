@@ -1,3 +1,4 @@
+pub mod align;
 pub mod config;
 pub mod encoding;
 pub mod finding;

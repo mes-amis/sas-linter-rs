@@ -1,8 +1,14 @@
 //! Source-level formatter — keyword casing, binary-operator spacing,
-//! and indentation. Mirrors the Ruby `SasLinter::Formatter` line-for-line:
-//! same config knobs (`keywords` / `operator_spacing` / `indent_width`),
-//! same "preserve user line breaks" rule, same DATA / PROC / DO / END /
-//! RUN / QUIT indentation state machine.
+//! and indentation. The token passes mirror the Ruby `SasLinter::Formatter`
+//! line-for-line: same config knobs (`keywords` / `operator_spacing` /
+//! `indent_width`), same "preserve user line breaks" rule, same DATA /
+//! PROC / DO / END / RUN / QUIT indentation state machine.
+//!
+//! On top of that (a deliberate divergence from the Ruby gem) two
+//! opinionated alignment passes run by default — banner-comment box
+//! alignment and assignment-run alignment (`src/align.rs`) — so that
+//! `sas-lint --format` with no config is a one-stop cleanup in the
+//! spirit of `terraform fmt`. Both can be disabled in the config.
 
 use anyhow::{anyhow, Result};
 use sas_lexer::{TokenChannel, TokenType};
@@ -22,6 +28,8 @@ pub struct Formatter {
     pub keywords: Casing,
     pub operator_spacing: bool,
     pub indent_width: Option<usize>,
+    pub align_comment_banners: bool,
+    pub align_assignments: bool,
 }
 
 impl Default for Formatter {
@@ -30,6 +38,8 @@ impl Default for Formatter {
             keywords: Casing::Preserve,
             operator_spacing: false,
             indent_width: None,
+            align_comment_banners: true,
+            align_assignments: true,
         }
     }
 }
@@ -56,27 +66,41 @@ impl Formatter {
                 .format
                 .indent_width
                 .and_then(|w| if w > 0 { Some(w as usize) } else { None });
+        let align_comment_banners = config.format.align_comment_banners.unwrap_or(true);
+        let align_assignments = config.format.align_assignments.unwrap_or(true);
         Ok(Formatter {
             keywords,
             operator_spacing,
             indent_width,
+            align_comment_banners,
+            align_assignments,
         })
     }
 
-    fn is_noop(&self) -> bool {
-        self.keywords == Casing::Preserve && !self.operator_spacing && self.indent_width.is_none()
+    /// True when a pass that needs the token stream is enabled; the
+    /// alignment passes are line-based and tokenize on their own.
+    fn token_passes_enabled(&self) -> bool {
+        self.keywords != Casing::Preserve || self.operator_spacing || self.indent_width.is_some()
     }
 
     pub fn format(&self, source: &str) -> String {
-        if self.is_noop() {
-            return source.to_string();
+        let mut out = if self.token_passes_enabled() {
+            let stream = TokenStream::tokenize(source);
+            let reconstructed = self.reconstruct_owned(&stream.all);
+            match self.indent_width {
+                Some(w) => self.apply_indentation(&reconstructed, &stream.all, w),
+                None => reconstructed,
+            }
+        } else {
+            source.to_string()
+        };
+        if self.align_comment_banners {
+            out = crate::align::align_comment_banners(&out);
         }
-        let stream = TokenStream::tokenize(source);
-        let reconstructed = self.reconstruct_owned(&stream.all);
-        match self.indent_width {
-            Some(w) => self.apply_indentation(&reconstructed, &stream.all, w),
-            None => reconstructed,
+        if self.align_assignments {
+            out = crate::align::align_assignments(&out);
         }
+        out
     }
 
     fn apply_casing(&self, t: &Token) -> String {
