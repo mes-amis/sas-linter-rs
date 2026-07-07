@@ -187,7 +187,8 @@ format:
   operator_spacing: true       # normalize spaces around binary operators and after commas
   indent_width: 2              # indentation width; 0 or omit to disable
   align_comment_banners: true  # realign `**  ...  **;` banner boxes: columns split on 2+ spaces,
-                               # uniform `**;` terminator width, borders/dividers stretched to match
+                               # uniform `**;` terminator width, borders/dividers stretched to match,
+                               # off-by-one row indents snapped, stacked `**..**; **..**;` lines split
   align_assignments: true      # align `=` and trailing comments across runs of simple assignments
 ```
 
