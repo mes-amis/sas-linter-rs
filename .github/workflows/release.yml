@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v[0-9]*"
+  # Dispatched by the CI tag job: tags pushed with GITHUB_TOKEN don't fire
+  # on:push workflows, so it triggers this workflow explicitly with the tag ref.
+  workflow_dispatch:
 
 jobs:
   build:
