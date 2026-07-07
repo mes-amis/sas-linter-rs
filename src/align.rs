@@ -221,7 +221,11 @@ fn split_stacked_banner_comments(source: &str) -> String {
             for (k, seg) in segments.iter().enumerate() {
                 out.push_str(indent);
                 out.push_str(seg);
-                out.push_str(if k + 1 < segments.len() { newline } else { term });
+                out.push_str(if k + 1 < segments.len() {
+                    newline
+                } else {
+                    term
+                });
             }
         } else {
             out.push_str(body);
@@ -273,7 +277,10 @@ fn render_banner_block(lines: &[(&str, &str)], rows: &[Option<BannerRow>], out: 
     let mut group_of = vec![0usize; rows.len()];
     let mut group_count = 1usize;
     for (idx, row) in rows.iter().enumerate() {
-        if matches!(row.as_ref().unwrap(), BannerRow::Border | BannerRow::Divider) {
+        if matches!(
+            row.as_ref().unwrap(),
+            BannerRow::Border | BannerRow::Divider
+        ) {
             group_count += 1;
         }
         group_of[idx] = group_count - 1;
@@ -549,12 +556,19 @@ mod tests {
 
     #[test]
     fn stacked_comments_split_one_per_line() {
-        let src = "data one;\n** VARIABLE ASSIGNMENTS **;     ** PUT YOUR VARIABLES HERE **;\nx = 1;\n";
+        let src =
+            "data one;\n** VARIABLE ASSIGNMENTS **;     ** PUT YOUR VARIABLES HERE **;\nx = 1;\n";
         let out = align_comment_banners(src);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4, "got:\n{out}");
-        assert!(lines[1].starts_with("** VARIABLE ASSIGNMENTS"), "got:\n{out}");
-        assert!(lines[2].starts_with("** PUT YOUR VARIABLES HERE"), "got:\n{out}");
+        assert!(
+            lines[1].starts_with("** VARIABLE ASSIGNMENTS"),
+            "got:\n{out}"
+        );
+        assert!(
+            lines[2].starts_with("** PUT YOUR VARIABLES HERE"),
+            "got:\n{out}"
+        );
         // The split pair aligns as its own block: same width.
         assert_eq!(lines[1].len(), lines[2].len(), "got:\n{out}");
         // Idempotent.
