@@ -1,6 +1,6 @@
 [package]
 name = "sas-linter"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.82"
 license = "AGPL-3.0-or-later"
