@@ -32,7 +32,12 @@ const GAP: usize = 2;
 /// aligned into columns (column widths reset at each divider/border),
 /// and every line is padded so the `**;` terminators — and the
 /// borders/dividers themselves — share one uniform width.
+///
+/// A line holding nothing but several complete `**…**;` comments is
+/// first split into one comment per line.
 pub fn align_comment_banners(source: &str) -> String {
+    let source = split_stacked_banner_comments(source);
+    let source = source.as_str();
     let protected = protected_lines(source);
     let lines = split_lines(source);
     let rows: Vec<Option<BannerRow>> = lines
@@ -180,6 +185,52 @@ enum BannerRow {
 
 static CELL_GAP: Lazy<Regex> = Lazy::new(|| Regex::new(r"  +").unwrap());
 
+static BANNER_COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*.*?\*\*;").unwrap());
+
+/// Split a line that consists solely of two or more complete `**…**;`
+/// comments (`** A **;   ** B **;`) into one comment per line, each
+/// keeping the original leading indent. Lines with any other content
+/// mixed in are left alone.
+fn split_stacked_banner_comments(source: &str) -> String {
+    let protected = protected_lines(source);
+    let lines = split_lines(source);
+    let mut out = String::with_capacity(source.len() + 64);
+    for (i, (body, term)) in lines.iter().enumerate() {
+        if protected.contains(&((i + 1) as u32)) {
+            out.push_str(body);
+            out.push_str(term);
+            continue;
+        }
+        let indent_len = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let (indent, rest) = body.split_at(indent_len);
+        let t = rest.trim_end();
+        let mut segments: Vec<&str> = Vec::new();
+        let mut pos = 0;
+        let mut clean = true;
+        for m in BANNER_COMMENT.find_iter(t) {
+            if !t[pos..m.start()].trim().is_empty() {
+                clean = false;
+                break;
+            }
+            segments.push(m.as_str());
+            pos = m.end();
+        }
+        clean = clean && t[pos..].trim().is_empty();
+        if clean && segments.len() >= 2 {
+            let newline = if term.is_empty() { "\n" } else { *term };
+            for (k, seg) in segments.iter().enumerate() {
+                out.push_str(indent);
+                out.push_str(seg);
+                out.push_str(if k + 1 < segments.len() { newline } else { term });
+            }
+        } else {
+            out.push_str(body);
+            out.push_str(term);
+        }
+    }
+    out
+}
+
 fn classify_banner_line(body: &str) -> Option<BannerRow> {
     let t = body.trim_end();
     if t.len() >= 5 && t.ends_with(';') && t[..t.len() - 1].chars().all(|c| c == '*') {
@@ -216,34 +267,71 @@ fn render_banner_block(lines: &[(&str, &str)], rows: &[Option<BannerRow>], out: 
         return;
     }
 
-    // Column widths per group; a border or divider starts a new group
+    // Assign rows to groups; a border or divider starts a new group
     // (e.g. the header fields above the `** ---- **;` line align
-    // independently of the variable table below it). A cell only
-    // widens its column when the row has more cells after it, so a
-    // long trailing note doesn't stretch the column it starts in.
+    // independently of the variable table below it).
     let mut group_of = vec![0usize; rows.len()];
-    let mut widths: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut group_count = 1usize;
     for (idx, row) in rows.iter().enumerate() {
-        match row.as_ref().unwrap() {
-            BannerRow::Border | BannerRow::Divider => {
-                widths.push(Vec::new());
-                group_of[idx] = widths.len() - 1;
+        if matches!(row.as_ref().unwrap(), BannerRow::Border | BannerRow::Divider) {
+            group_count += 1;
+        }
+        group_of[idx] = group_count - 1;
+    }
+
+    // Modal interior indent per group, over multi-cell rows. A stray
+    // extra space in the original tab-aligned text pushes a row one
+    // column right of its siblings; a multi-cell row sitting exactly
+    // one space deeper than the group's most common indent snaps back
+    // onto it. Ties prefer the shallower indent.
+    let mut indent_counts: Vec<std::collections::HashMap<usize, usize>> =
+        vec![std::collections::HashMap::new(); group_count];
+    for (idx, row) in rows.iter().enumerate() {
+        if let BannerRow::Content { indent, cells } = row.as_ref().unwrap() {
+            if cells.len() >= 2 {
+                *indent_counts[group_of[idx]].entry(*indent).or_insert(0) += 1;
             }
-            BannerRow::Content { indent, cells } => {
-                group_of[idx] = widths.len() - 1;
-                let w = widths.last_mut().unwrap();
-                if cells.len() >= 2 {
-                    for k in 0..cells.len() - 1 {
-                        let cw = if k == 0 {
-                            indent + char_len(&cells[0])
-                        } else {
-                            char_len(&cells[k])
-                        };
-                        if w.len() <= k {
-                            w.resize(k + 1, 0);
-                        }
-                        w[k] = w[k].max(cw);
+        }
+    }
+    let modal_indent: Vec<Option<usize>> = indent_counts
+        .iter()
+        .map(|counts| {
+            counts
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(indent, _)| *indent)
+        })
+        .collect();
+    let effective_indent = |idx: usize, indent: usize, cells: &[String]| -> usize {
+        if cells.len() >= 2 {
+            if let Some(m) = modal_indent[group_of[idx]] {
+                if indent == m + 1 {
+                    return m;
+                }
+            }
+        }
+        indent
+    };
+
+    // Column widths per group. A cell only widens its column when the
+    // row has more cells after it, so a long trailing note doesn't
+    // stretch the column it starts in.
+    let mut widths: Vec<Vec<usize>> = vec![Vec::new(); group_count];
+    for (idx, row) in rows.iter().enumerate() {
+        if let BannerRow::Content { indent, cells } = row.as_ref().unwrap() {
+            let w = &mut widths[group_of[idx]];
+            if cells.len() >= 2 {
+                let indent = effective_indent(idx, *indent, cells);
+                for k in 0..cells.len() - 1 {
+                    let cw = if k == 0 {
+                        indent + char_len(&cells[0])
+                    } else {
+                        char_len(&cells[k])
+                    };
+                    if w.len() <= k {
+                        w.resize(k + 1, 0);
                     }
+                    w[k] = w[k].max(cw);
                 }
             }
         }
@@ -259,7 +347,7 @@ fn render_banner_block(lines: &[(&str, &str)], rows: &[Option<BannerRow>], out: 
                 }
                 let w = &widths[group_of[idx]];
                 let mut s = String::new();
-                for _ in 0..*indent {
+                for _ in 0..effective_indent(idx, *indent, cells) {
                     s.push(' ');
                 }
                 s.push_str(&cells[0]);
@@ -442,6 +530,41 @@ mod tests {
 ** ------ **;\n";
         let once = align_comment_banners(src);
         assert_eq!(align_comment_banners(&once), once);
+    }
+
+    #[test]
+    fn off_by_one_indent_snaps_to_group_mode() {
+        let src = "\
+**  Age at assessment      sAGE    18-120  **;\n\
+**   Cognitive Performance Scale   sCPS   0-1   **;\n\
+**  Gender   iA2bis     1-3       **;\n";
+        let out = align_comment_banners(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // The row with one extra leading space joins its siblings' column.
+        assert!(lines[1].starts_with("**  Cognitive"), "got:\n{out}");
+        let c1 = lines[0].find("sAGE").unwrap();
+        let c2 = lines[1].find("sCPS").unwrap();
+        assert_eq!(c1, c2, "got:\n{out}");
+    }
+
+    #[test]
+    fn stacked_comments_split_one_per_line() {
+        let src = "data one;\n** VARIABLE ASSIGNMENTS **;     ** PUT YOUR VARIABLES HERE **;\nx = 1;\n";
+        let out = align_comment_banners(src);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "got:\n{out}");
+        assert!(lines[1].starts_with("** VARIABLE ASSIGNMENTS"), "got:\n{out}");
+        assert!(lines[2].starts_with("** PUT YOUR VARIABLES HERE"), "got:\n{out}");
+        // The split pair aligns as its own block: same width.
+        assert_eq!(lines[1].len(), lines[2].len(), "got:\n{out}");
+        // Idempotent.
+        assert_eq!(align_comment_banners(&out), out);
+    }
+
+    #[test]
+    fn single_comment_with_interior_semicolon_is_not_split() {
+        let src = "**  REVISION DATES:   01/01/00; 02/02/01 **;\n";
+        assert_eq!(align_comment_banners(src), src);
     }
 
     #[test]
