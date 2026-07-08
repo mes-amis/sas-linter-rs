@@ -47,10 +47,20 @@ A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscod
 
 ```sh
 # Install from the command line (substitute the current vscode-v* tag and matching version):
-TAG=vscode-v0.2.2
-VER=0.2.2
+TAG=vscode-v0.3.0
+VER=0.3.0
 curl -fsSL -o /tmp/sas-linter-vscode.vsix \
   "https://github.com/mes-amis/sas-linter-rs/releases/download/${TAG}/sas-linter-vscode-${VER}.vsix"
+code --install-extension /tmp/sas-linter-vscode.vsix
+```
+
+With the [GitHub CLI](https://cli.github.com/), pick up the latest extension release automatically:
+
+```sh
+TAG=$(gh api repos/mes-amis/sas-linter-rs/releases \
+  --jq '[.[].tag_name | select(startswith("vscode-v"))][0]')
+curl -fsSL -o /tmp/sas-linter-vscode.vsix \
+  "https://github.com/mes-amis/sas-linter-rs/releases/download/${TAG}/sas-linter-vscode-${TAG#vscode-v}.vsix"
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
