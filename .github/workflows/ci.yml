@@ -51,3 +51,18 @@ jobs:
           # Tags pushed with GITHUB_TOKEN don't fire on:push workflows,
           # so dispatch the release workflow directly at the tag ref.
           gh workflow run release.yml --ref "${tag}"
+      - name: Tag new VSCode extension version and trigger release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(jq -r .version editors/vscode/package.json)"
+          tag="vscode-v${version}"
+          if git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; nothing to release"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "${tag}"
+          git push origin "${tag}"
+          gh workflow run release-vscode.yml --ref "${tag}"
