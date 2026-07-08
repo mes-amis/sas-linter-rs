@@ -2,7 +2,7 @@
   "name": "sas-linter-vscode",
   "displayName": "SAS Linter",
   "description": "Lint and format SAS source files via the sas-lint binary.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "publisher": "mes-amis",
   "license": "AGPL-3.0-or-later",
   "repository": {
@@ -55,6 +55,13 @@
           "type": "string",
           "default": "",
           "description": "Absolute path to the sas-lint binary. Leave blank to use the bundled auto-downloaded binary."
+        },
+        "sasLinter.version": {
+          "type": "string",
+          "default": "",
+          "pattern": "^$|^v?\\d+\\.\\d+\\.\\d+.*$",
+          "patternErrorMessage": "Expected a release tag like v0.3.2 (or 0.3.2), or blank for the default.",
+          "description": "Release tag of the sas-lint binary to auto-download, e.g. v0.3.2 (see github.com/mes-amis/sas-linter-rs/releases). Leave blank for the version pinned by this extension. Ignored when sasLinter.path is set."
         },
         "sasLinter.config": {
           "type": "string",

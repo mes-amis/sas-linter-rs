@@ -56,7 +56,7 @@ code --install-extension /tmp/sas-linter-vscode.vsix
 
 Or grab the `.vsix` from the [release page](https://github.com/mes-amis/sas-linter-rs/releases) (filter by `vscode-v*` tags) and drag it into the VSCode Extensions view → `…` → "Install from VSIX…".
 
-On first activation the extension auto-downloads the matching `sas-lint` binary from the GitHub release for your platform and caches it under VSCode's global storage. Override with the `sasLinter.path` setting to point at a local build instead — useful while iterating on rules.
+On first activation the extension auto-downloads the matching `sas-lint` binary from the GitHub release for your platform and caches it under VSCode's global storage. Pin a different release with the `sasLinter.version` setting (downloaded on the fly — no extension update needed), or override with the `sasLinter.path` setting to point at a local build instead — useful while iterating on rules.
 
 Features:
 
