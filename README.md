@@ -1,6 +1,6 @@
 # sas-linter (Rust)
 
-A configurable lint engine for SAS source files. Single-binary Rust port of the [Ruby `sas-linter` gem](https://github.com/mes-amis/sas-linter), built on Misha Perlov's [`sas-lexer`](https://github.com/mishamsk/sas-lexer) crate. Ships seventeen pluggable rules covering structural defects, cosmetic issues, and source-header conventions, plus a `--format` mode that handles keyword casing, operator spacing, indentation, banner-comment alignment, and assignment alignment.
+A configurable lint engine for SAS source files. Single-binary Rust port of the [Ruby `sas-linter` gem](https://github.com/mes-amis/sas-linter), built on Misha Perlov's [`sas-lexer`](https://github.com/mishamsk/sas-lexer) crate. Ships nineteen pluggable rules covering structural defects, cosmetic issues, and source-header conventions, plus a `--format` mode that handles keyword casing, operator spacing, indentation, banner-comment alignment, and assignment alignment.
 
 No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for your platform and run it.
 
@@ -122,6 +122,10 @@ rules:
   missing_assignment_semicolon:
     enabled: true
     autofix: false             # rule supports autofix; off by default
+
+  invalid_assignment_target:
+    enabled: true
+    autofix: false             # join the space-separated words with `_`
 
   unterminated_comment:
     enabled: true
@@ -247,6 +251,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `encoding_issues` | Smart-quote / em-dash / Win-1252 byte sequences that confuse downstream tooling. |
 | `malformed_if_condition` | Empty conditions, missing operators, orphan `then`, unbalanced parens, etc. |
 | `missing_assignment_semicolon` | Assignment statements followed by an inline `**` comment but no terminating `;`. |
+| `invalid_assignment_target` | Data-step assignment whose target is several space-separated words (`Predicted risk = ...`) — SAS variable names cannot contain spaces. Suggests the underscore-joined name; autofix applies it. |
 | `unterminated_comment` | A standalone `** … **` comment whose missing `;` lets the SAS lexer extend the comment into the next line of real code, silently swallowing it. Autofix appends the `;`. |
 | `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string. Autofix inserts the `=`. |
 | `invalid_numeric_literal` | INTEGER_LITERAL tokens whose text isn't actually a valid SAS numeric literal (e.g. `1f`, `1d2`). |
