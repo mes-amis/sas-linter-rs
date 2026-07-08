@@ -176,8 +176,10 @@ pub fn align_assignments(source: &str) -> String {
 enum BannerRow {
     /// A full-width star line: `****…****;`
     Border,
-    /// A dash divider inside the box: `** ------- **;`
-    Divider,
+    /// A dash or star divider inside the box (`** ------- **;` or
+    /// `** ******* **;`); `fill` is whichever character was used, so
+    /// re-rendering doesn't change one into the other.
+    Divider { fill: char },
     /// A `**  …  **;` line; `indent` is the leading-space count of the
     /// interior, `cells` the interior split on runs of 2+ spaces.
     Content { indent: usize, cells: Vec<String> },
@@ -186,6 +188,31 @@ enum BannerRow {
 static CELL_GAP: Lazy<Regex> = Lazy::new(|| Regex::new(r"  +").unwrap());
 
 static BANNER_COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*.*?\*\*;").unwrap());
+
+/// Split banner interior text into cells on runs of 2+ spaces, except a
+/// run immediately preceded by a period. "Two spaces after a full stop"
+/// is a common prose typing convention, and source headers routinely
+/// wrap a long description across several banner lines this way;
+/// treating every such gap as a column boundary misreads a wrapped
+/// sentence as a two-cell label/value row. Its wide first "cell" then
+/// dominates the column-width computation for the whole banner group,
+/// dragging every genuine label:value row — and, via the
+/// uniform-total-width pass, the entire box — out to match it. Genuine
+/// label rows split on a colon (`PROGRAM:  FOO.txt`), never a period, so
+/// this is safe to skip without touching real column boundaries.
+fn split_cells(trimmed: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut cell_start = 0usize;
+    for m in CELL_GAP.find_iter(trimmed) {
+        if trimmed[..m.start()].ends_with('.') {
+            continue;
+        }
+        cells.push(trimmed[cell_start..m.start()].to_string());
+        cell_start = m.end();
+    }
+    cells.push(trimmed[cell_start..].to_string());
+    cells
+}
 
 /// Split a line that consists solely of two or more complete `**…**;`
 /// comments (`** A **;   ** B **;`) into one comment per line, each
@@ -243,14 +270,24 @@ fn classify_banner_line(body: &str) -> Option<BannerRow> {
     if t.len() >= 6 && t.starts_with("**") && t.ends_with("**;") {
         let interior = &t[2..t.len() - 3];
         let trimmed = interior.trim();
-        if !trimmed.is_empty() && trimmed.chars().all(|c| c == '-') {
-            return Some(BannerRow::Divider);
+        // A divider wrapped in the same `**  ...  **;` shell as an
+        // ordinary content line (`**********...  **;`) rather than a
+        // bare `****...;` border. Also recognized on '*': some sources
+        // use a run of asterisks as a stronger in-box separator than
+        // the dash divider. Either way it's decorative, not data, and
+        // must still reset the group like a bare border does — missed,
+        // it reads as one huge content cell that merges the sections on
+        // either side into a single alignment group.
+        if let Some(fill) = trimmed.chars().next() {
+            if matches!(fill, '-' | '*') && trimmed.chars().all(|c| c == fill) {
+                return Some(BannerRow::Divider { fill });
+            }
         }
         let indent = char_len(interior) - char_len(interior.trim_start());
         let cells: Vec<String> = if trimmed.is_empty() {
             Vec::new()
         } else {
-            CELL_GAP.split(trimmed).map(str::to_string).collect()
+            split_cells(trimmed)
         };
         return Some(BannerRow::Content { indent, cells });
     }
@@ -279,11 +316,40 @@ fn render_banner_block(lines: &[(&str, &str)], rows: &[Option<BannerRow>], out: 
     for (idx, row) in rows.iter().enumerate() {
         if matches!(
             row.as_ref().unwrap(),
-            BannerRow::Border | BannerRow::Divider
+            BannerRow::Border | BannerRow::Divider { .. }
         ) {
             group_count += 1;
         }
         group_of[idx] = group_count - 1;
+    }
+
+    // Pull wrapped continuations of an already-valued field out of their
+    // enclosing group. A multi-cell row indented more than one level
+    // past the content row directly above it, when that row already
+    // carries a value (2+ cells), is text wrapping onto a second line —
+    // e.g. `SOURCE:  A short reference` followed by
+    // `SEE ALSO THE FOLLOWING RELATED DOCUMENT:  NONE`. Left in the
+    // parent group, that continuation's own wide "label" cell would
+    // dominate the column-width computation and drag every sibling
+    // label's value column out to match it. One level deeper is still
+    // the existing stray-space case above and snaps to the group's
+    // modal indent as before; each continuation instead gets its own
+    // singleton group, rendered against a column width of just itself.
+    for idx in 1..rows.len() {
+        let is_continuation = match (rows[idx].as_ref().unwrap(), rows[idx - 1].as_ref().unwrap()) {
+            (
+                BannerRow::Content { indent, cells },
+                BannerRow::Content {
+                    indent: prev_indent,
+                    cells: prev_cells,
+                },
+            ) => cells.len() >= 2 && prev_cells.len() >= 2 && *indent > prev_indent + 1,
+            _ => false,
+        };
+        if is_continuation {
+            group_of[idx] = group_count;
+            group_count += 1;
+        }
     }
 
     // Modal interior indent per group, over multi-cell rows. A stray
@@ -386,9 +452,9 @@ fn render_banner_block(lines: &[(&str, &str)], rows: &[Option<BannerRow>], out: 
                 out.push_str(&"*".repeat(width - 1));
                 out.push(';');
             }
-            BannerRow::Divider => {
+            BannerRow::Divider { fill } => {
                 out.push_str("** ");
-                out.push_str(&"-".repeat(width - 7));
+                out.push_str(&fill.to_string().repeat(width - 7));
                 out.push_str(" **;");
             }
             BannerRow::Content { .. } => {
@@ -552,6 +618,116 @@ mod tests {
         let c1 = lines[0].find("sAGE").unwrap();
         let c2 = lines[1].find("sCPS").unwrap();
         assert_eq!(c1, c2, "got:\n{out}");
+    }
+
+    #[test]
+    fn double_space_after_period_is_not_a_column_boundary() {
+        // "Two spaces after a full stop" is ordinary prose typing, not a
+        // table gap. A wrapped sentence like this must not be read as a
+        // two-cell label/value row.
+        let src = "\
+**  PROGRAM:      FOO.txt        **;\n\
+**  DESCRIPTION:  A SHORT SUMMARY OF WHAT THIS PROGRAM DOES **;\n\
+**                FOR TWO REASONS.  THE SECOND REASON IS LONG **;\n";
+        let out = align_comment_banners(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // The wrapped line keeps its original single-cell spacing rather
+        // than being padded out to a column position.
+        assert!(
+            lines[2].contains("FOR TWO REASONS.  THE SECOND REASON IS LONG"),
+            "got:\n{out}"
+        );
+        // Unaffected: the genuine label rows still align on their colon.
+        assert!(lines[0].contains("PROGRAM:      FOO.txt"), "got:\n{out}");
+    }
+
+    #[test]
+    fn deep_continuation_of_a_valued_label_does_not_widen_the_group() {
+        // A label whose value wraps onto an indented second line that
+        // itself looks like `LABEL:  VALUE` (e.g. a long sub-reference)
+        // must not drag the shallow label rows' value column out to
+        // match its own, much deeper, indent.
+        let src = "\
+**  PROGRAM:      FOO.txt        **;\n\
+**  BY:           ALICE          **;\n\
+**  SOURCE:       A SHORT REFERENCE **;\n\
+**                SEE ALSO THE FOLLOWING RELATED DOCUMENT:  NONE **;\n\
+**  APPLIES TO:   EVERYONE       **;\n";
+        let out = align_comment_banners(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // The shallow label rows keep a tight, shared column — not one
+        // stretched out to fit the deep sub-reference line's own label.
+        let c1 = lines[0].find("FOO.txt").unwrap();
+        let c2 = lines[1].find("ALICE").unwrap();
+        let c3 = lines[4].find("EVERYONE").unwrap();
+        assert_eq!(c1, c2, "got:\n{out}");
+        assert_eq!(c1, c3, "got:\n{out}");
+        // The deep continuation still renders sensibly against its own
+        // column, independent of the shallow rows around it.
+        assert!(
+            lines[3].contains("SEE ALSO THE FOLLOWING RELATED DOCUMENT:  NONE"),
+            "got:\n{out}"
+        );
+        // The whole box no longer balloons out to accommodate the one
+        // deep line: total width stays close to the longest shallow row.
+        assert!(lines[0].len() < 70, "got:\n{out}");
+    }
+
+    #[test]
+    fn continuation_pass_is_idempotent() {
+        let src = "\
+**  PROGRAM:      FOO.txt        **;\n\
+**  SOURCE:       A SHORT REFERENCE **;\n\
+**                SEE ALSO THE FOLLOWING RELATED DOCUMENT:  NONE **;\n";
+        let once = align_comment_banners(src);
+        assert_eq!(align_comment_banners(&once), once);
+    }
+
+    #[test]
+    fn star_run_wrapped_in_content_shell_is_a_divider_not_content() {
+        // `**********...  **;` is a divider dressed in the same shell as
+        // an ordinary content line, not a bare `****...;` border. Missed,
+        // it reads as one giant content cell and merges the section
+        // above it with the section below into a single alignment
+        // group — the two sections must stay independently aligned.
+        let src = "\
+**  SHORT LABEL:   A short value **;\n\
+**  A MUCH LONGER LABEL HERE:  its value **;\n\
+**********************************  **;\n\
+** UNRELATED PARAGRAPH TEXT AND MORE **;\n\
+** SECOND. LINE OF THAT PARAGRAPH **;\n";
+        let out = align_comment_banners(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // The divider is still recognized as one (uniform box width,
+        // stretched border/divider fill) ...
+        assert!(lines[2].trim_start_matches("**").trim().starts_with('*'));
+        // ... and the paragraph below it never had to widen to match
+        // the long label above it: it keeps its own short column.
+        assert!(lines[3].len() < 60, "got:\n{out}");
+        // The star fill is preserved rather than rewritten to dashes.
+        assert!(
+            lines[2].contains('*') && !lines[2].contains('-'),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn dash_and_star_dividers_keep_their_own_fill_character() {
+        let src = "\
+**  PROGRAM:  FOO.txt  **;\n\
+** ----- **;\n\
+** ***** **;\n";
+        let out = align_comment_banners(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // Strip the `** ` / ` **;` wrapper before checking fill — both
+        // lines legitimately contain '*' there regardless of fill.
+        let fill_of = |l: &str| {
+            l.trim_start_matches("** ")
+                .trim_end_matches(" **;")
+                .to_string()
+        };
+        assert!(fill_of(lines[1]).chars().all(|c| c == '-'), "got:\n{out}");
+        assert!(fill_of(lines[2]).chars().all(|c| c == '*'), "got:\n{out}");
     }
 
     #[test]
