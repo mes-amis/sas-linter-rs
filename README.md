@@ -16,6 +16,7 @@ Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-lint
 | `x86_64-apple-darwin`           | macOS (Intel)       |
 | `x86_64-unknown-linux-musl`     | Linux x86_64        |
 | `aarch64-unknown-linux-musl`    | Linux arm64         |
+| `x86_64-pc-windows-msvc`        | Windows x86_64      |
 
 ```sh
 # Pick the artifact for your platform, drop it on $PATH:
@@ -24,6 +25,8 @@ curl -fsSL -o sas-lint \
 chmod +x sas-lint
 ./sas-lint --list-rules
 ```
+
+On Windows, grab `sas-lint-<TAG>-x86_64-pc-windows-msvc.exe` from the release page and put it somewhere on `%PATH%`.
 
 ### From source
 
@@ -44,8 +47,8 @@ A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscod
 
 ```sh
 # Install from the command line (substitute the current vscode-v* tag and matching version):
-TAG=vscode-v0.2.1
-VER=0.2.1
+TAG=vscode-v0.2.2
+VER=0.2.2
 curl -fsSL -o /tmp/sas-linter-vscode.vsix \
   "https://github.com/mes-amis/sas-linter-rs/releases/download/${TAG}/sas-linter-vscode-${VER}.vsix"
 code --install-extension /tmp/sas-linter-vscode.vsix

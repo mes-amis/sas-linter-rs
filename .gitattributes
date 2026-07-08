@@ -1,0 +1,4 @@
+# Never let git rewrite line endings, even with core.autocrlf=true (the
+# Git for Windows default). Fixtures under tests/fixtures/ encode exact
+# bytes — CRLF, lone CR, and non-UTF-8 sequences ARE the test.
+* -text
