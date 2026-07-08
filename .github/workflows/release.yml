@@ -24,6 +24,8 @@ jobs:
             target: x86_64-unknown-linux-musl
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,15 +38,25 @@ jobs:
       - name: Build (cross, for musl)
         if: contains(matrix.target, 'linux-musl')
         run: cross build --release --target ${{ matrix.target }}
-      - name: Build (cargo, for darwin)
-        if: contains(matrix.target, 'darwin')
+      - name: Build (cargo, for darwin and windows)
+        if: ${{ !contains(matrix.target, 'linux-musl') }}
         run: cargo build --release --target ${{ matrix.target }}
       - name: Stage artifact
+        shell: bash
         run: |
           mkdir -p dist
           name="sas-lint-${{ github.ref_name }}-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/sas-lint" "dist/${name}"
-          (cd dist && shasum -a 256 "${name}" > "${name}.sha256")
+          bin="target/${{ matrix.target }}/release/sas-lint"
+          case "${{ matrix.target }}" in
+            *windows*) bin="${bin}.exe"; name="${name}.exe" ;;
+          esac
+          cp "${bin}" "dist/${name}"
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${name}" > "${name}.sha256"
+          else
+            shasum -a 256 "${name}" > "${name}.sha256"
+          fi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

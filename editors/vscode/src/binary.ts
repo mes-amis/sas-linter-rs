@@ -10,14 +10,19 @@ import * as vscode from "vscode";
  *
  *   github.com/mes-amis/sas-linter-rs/releases/download/<TAG>/sas-lint-<TAG>-<TARGET>
  */
-const BINARY_VERSION = "v0.2.1";
+const BINARY_VERSION = "v0.3.2";
 const RELEASE_REPO = "mes-amis/sas-linter-rs";
+
+// Release assets carry `.exe` on Windows; mirror that in the cache path so
+// the binary stays executable when copied around.
+const EXE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 
 type Target =
   | "aarch64-apple-darwin"
   | "x86_64-apple-darwin"
   | "x86_64-unknown-linux-musl"
-  | "aarch64-unknown-linux-musl";
+  | "aarch64-unknown-linux-musl"
+  | "x86_64-pc-windows-msvc";
 
 function detectTarget(): Target | undefined {
   if (process.platform === "darwin") {
@@ -26,12 +31,15 @@ function detectTarget(): Target | undefined {
   if (process.platform === "linux") {
     return process.arch === "arm64" ? "aarch64-unknown-linux-musl" : "x86_64-unknown-linux-musl";
   }
+  if (process.platform === "win32" && process.arch === "x64") {
+    return "x86_64-pc-windows-msvc";
+  }
   return undefined;
 }
 
 function cachedBinaryPath(context: vscode.ExtensionContext): string {
   const dir = context.globalStorageUri.fsPath;
-  return path.join(dir, "bin", `sas-lint-${BINARY_VERSION}`);
+  return path.join(dir, "bin", `sas-lint-${BINARY_VERSION}${EXE_SUFFIX}`);
 }
 
 async function downloadBinary(
@@ -41,7 +49,7 @@ async function downloadBinary(
   const dest = cachedBinaryPath(context);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
 
-  const url = `https://github.com/${RELEASE_REPO}/releases/download/${BINARY_VERSION}/sas-lint-${BINARY_VERSION}-${target}`;
+  const url = `https://github.com/${RELEASE_REPO}/releases/download/${BINARY_VERSION}/sas-lint-${BINARY_VERSION}-${target}${EXE_SUFFIX}`;
   const tmp = `${dest}.tmp`;
 
   await vscode.window.withProgress(
