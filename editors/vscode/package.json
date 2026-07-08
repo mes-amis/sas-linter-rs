@@ -2,7 +2,7 @@
   "name": "sas-linter-vscode",
   "displayName": "SAS Linter",
   "description": "Lint and format SAS source files via the sas-lint binary.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "mes-amis",
   "license": "AGPL-3.0-or-later",
   "repository": {
