@@ -4,14 +4,28 @@ import { pipeline } from "node:stream/promises";
 import * as vscode from "vscode";
 
 /**
- * Pin the binary version the extension expects. Bump when releasing a new
- * sas-linter-rs version that the extension depends on. The asset path follows
- * the convention from the upstream README:
+ * Default binary version the extension expects. Bump when releasing a new
+ * sas-linter-rs version that the extension depends on. Users can override it
+ * per-install with the `sasLinter.version` setting — no extension release
+ * needed to pick up a new linter. The asset path follows the convention from
+ * the upstream README:
  *
  *   github.com/mes-amis/sas-linter-rs/releases/download/<TAG>/sas-lint-<TAG>-<TARGET>
  */
-const BINARY_VERSION = "v0.3.2";
+const DEFAULT_BINARY_VERSION = "v0.3.2";
 const RELEASE_REPO = "mes-amis/sas-linter-rs";
+
+/**
+ * Release tag to download: the `sasLinter.version` setting when set (a bare
+ * `0.3.2` is normalized to `v0.3.2`), otherwise the pinned default.
+ */
+function configuredVersion(): string {
+  const raw = vscode.workspace.getConfiguration("sasLinter").get<string>("version")?.trim();
+  if (!raw) {
+    return DEFAULT_BINARY_VERSION;
+  }
+  return /^\d/.test(raw) ? `v${raw}` : raw;
+}
 
 // Release assets carry `.exe` on Windows; mirror that in the cache path so
 // the binary stays executable when copied around.
@@ -37,25 +51,26 @@ function detectTarget(): Target | undefined {
   return undefined;
 }
 
-function cachedBinaryPath(context: vscode.ExtensionContext): string {
+function cachedBinaryPath(context: vscode.ExtensionContext, version: string): string {
   const dir = context.globalStorageUri.fsPath;
-  return path.join(dir, "bin", `sas-lint-${BINARY_VERSION}${EXE_SUFFIX}`);
+  return path.join(dir, "bin", `sas-lint-${version}${EXE_SUFFIX}`);
 }
 
 async function downloadBinary(
   context: vscode.ExtensionContext,
   target: Target,
+  version: string,
 ): Promise<string> {
-  const dest = cachedBinaryPath(context);
+  const dest = cachedBinaryPath(context, version);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
 
-  const url = `https://github.com/${RELEASE_REPO}/releases/download/${BINARY_VERSION}/sas-lint-${BINARY_VERSION}-${target}${EXE_SUFFIX}`;
+  const url = `https://github.com/${RELEASE_REPO}/releases/download/${version}/sas-lint-${version}-${target}${EXE_SUFFIX}`;
   const tmp = `${dest}.tmp`;
 
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `Downloading sas-lint ${BINARY_VERSION} (${target})`,
+      title: `Downloading sas-lint ${version} (${target})`,
     },
     async () => {
       const res = await fetch(url, { redirect: "follow" });
@@ -75,7 +90,8 @@ async function downloadBinary(
 /**
  * Resolve the sas-lint binary path. Precedence:
  *   1. `sasLinter.path` setting (absolute path the user configured)
- *   2. Previously cached download in globalStorage
+ *   2. Previously cached download in globalStorage (keyed by the
+ *      `sasLinter.version` setting, or the pinned default when unset)
  *   3. Auto-download from GitHub releases
  *
  * Throws with a user-facing message on unsupported platforms or download
@@ -94,7 +110,8 @@ export async function resolveBinary(
     return override;
   }
 
-  const cached = cachedBinaryPath(context);
+  const version = configuredVersion();
+  const cached = cachedBinaryPath(context, version);
   if (!force && fs.existsSync(cached)) {
     return cached;
   }
@@ -107,5 +124,5 @@ export async function resolveBinary(
     );
   }
 
-  return await downloadBinary(context, target);
+  return await downloadBinary(context, target, version);
 }

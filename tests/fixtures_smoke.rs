@@ -38,6 +38,7 @@ const PAIRS: &[(&str, &str)] = &[
         "missing_assignment_semicolon",
     ),
     ("invalid_numeric_literal", "invalid_numeric_literal"),
+    ("invalid_assignment_target", "invalid_assignment_target"),
     ("commented_out_guard", "commented_out_guard"),
     ("choose_one_template", "choose_one_template"),
     ("unreachable_inner_branch_value", "unreachable_inner"),

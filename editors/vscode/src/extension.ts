@@ -31,6 +31,29 @@ export function activate(context: vscode.ExtensionContext): void {
     if (runMode() !== "manual") diagnostics.scheduleRun(doc);
   }
 
+  // Re-resolve the binary when the pinned version or path changes —
+  // downloads the newly selected release immediately (with progress
+  // notification) and re-lints open SAS documents against it.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (
+        !e.affectsConfiguration("sasLinter.version") &&
+        !e.affectsConfiguration("sasLinter.path")
+      ) {
+        return;
+      }
+      try {
+        await resolveBinary(context);
+      } catch (err) {
+        vscode.window.showErrorMessage(`sas-linter: ${(err as Error).message}`);
+        return;
+      }
+      for (const doc of vscode.workspace.textDocuments) {
+        if (runMode() !== "manual") diagnostics.scheduleRun(doc);
+      }
+    }),
+  );
+
   // Formatter — only register when the setting allows it. Toggling at runtime
   // takes effect on next activation; we don't watch the setting live.
   const formatEnabled = vscode.workspace

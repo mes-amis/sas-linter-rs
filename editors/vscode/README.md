@@ -7,13 +7,14 @@ Lint and format SAS source files using the [sas-linter-rs](https://github.com/me
 - **Quick Fix**: per-rule autofix code action for any rule that supports it.
 - **Fix all**: command palette → `SAS Linter: Run all autofixes on current file`.
 
-The extension auto-downloads the matching `sas-lint` binary from GitHub Releases on first activation and caches it under `globalStorage`. Override with `sasLinter.path` to use a locally built binary instead — useful when developing this repo (`cargo build --release` then point the setting at `target/release/sas-lint`).
+The extension auto-downloads the matching `sas-lint` binary from GitHub Releases on first activation and caches it under `globalStorage`. Set `sasLinter.version` to pin a different release tag — the extension downloads it on the next lint run, no extension update required. Or override with `sasLinter.path` to use a locally built binary instead — useful when developing this repo (`cargo build --release` then point the setting at `target/release/sas-lint`).
 
 ## Settings
 
 | key | default | meaning |
 |---|---|---|
-| `sasLinter.path` | `""` | Absolute path to `sas-lint`. Empty = use the auto-downloaded binary. |
+| `sasLinter.path` | `""` | Absolute path to `sas-lint`. Empty = use the auto-downloaded binary. Takes precedence over `sasLinter.version`. |
+| `sasLinter.version` | `""` | Release tag of the `sas-lint` binary to auto-download (e.g. `v0.3.2`; a bare `0.3.2` also works). Empty = the version pinned by the extension. Changing it triggers a download and re-lint immediately. |
 | `sasLinter.config` | `""` | Path to a sas-linter YAML config (workspace-relative or absolute). Empty = sas-lint's default lookup (`config/lint.yaml` in cwd). |
 | `sasLinter.run` | `onSave` | When to run the linter: `onSave`, `onType`, or `manual`. |
 | `sasLinter.format.enabled` | `true` | Register `sas-lint --format` as the SAS document formatter. |
@@ -38,8 +39,7 @@ Press `F5` in VSCode with this folder open to launch an Extension Development Ho
 | macOS Intel | `x86_64-apple-darwin` |
 | Linux x86_64 | `x86_64-unknown-linux-musl` |
 | Linux arm64 | `aarch64-unknown-linux-musl` |
-
-Windows isn't published yet — build from source and set `sasLinter.path`.
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
 
 ## License
 
