@@ -16,9 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-26
             target: aarch64-apple-darwin
-          - os: macos-latest
+          - os: macos-26
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
@@ -27,7 +27,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -58,7 +58,7 @@ jobs:
             shasum -a 256 "${name}" > "${name}.sha256"
           fi
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sas-lint-${{ matrix.target }}
           path: dist/*
@@ -70,13 +70,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
