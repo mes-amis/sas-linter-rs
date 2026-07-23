@@ -17,6 +17,7 @@ pub mod malformed_if_condition;
 pub mod malformed_label_statement;
 pub mod missing_assignment_semicolon;
 pub mod source_headers;
+pub mod star_comment_swallows_code;
 pub mod tab_expansion;
 pub mod trailing_whitespace;
 pub mod unreachable_inner_branch_value;
@@ -55,6 +56,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         inconsistent_variable_case::meta(),
         format_for_unknown_variable::meta(),
         unterminated_comment::meta(),
+        star_comment_swallows_code::meta(),
     ]
 }
 

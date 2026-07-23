@@ -263,6 +263,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `missing_assignment_semicolon` | Assignment statements followed by an inline `**` comment but no terminating `;`. |
 | `invalid_assignment_target` | Data-step assignment whose target is several space-separated words (`Predicted risk = ...`) — SAS variable names cannot contain spaces. Suggests the underscore-joined name; autofix applies it. |
 | `unterminated_comment` | A standalone `** … **` comment whose missing `;` lets the SAS lexer extend the comment into the next line of real code, silently swallowing it. Autofix appends the `;`. |
+| `star_comment_swallows_code` | A trailing `*` comment on a code line that isn't terminated on its own line (commonly ending in `:` — a typo for `;`). SAS runs the comment to the next `;`, silently disabling the following statement. |
 | `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string. Autofix inserts the `=`. |
 | `invalid_numeric_literal` | INTEGER_LITERAL tokens whose text isn't actually a valid SAS numeric literal (e.g. `1f`, `1d2`). |
 | `variable_value_out_of_known_range` | `if VAR = N` / `if VAR in (...)` literals fall outside the variable's documented acceptable values. Loads the catalog from one or more CSVs with configurable column names and column separator (`,`, `;`, tab). |
