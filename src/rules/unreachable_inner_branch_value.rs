@@ -182,11 +182,10 @@ fn parse_comparison(tokens: &[Token], op_idx: usize, op: &Token) -> Option<(Vec<
                     return Some((values, k + 1));
                 } else if t.token_type == TokenType::COMMA {
                     k += 1;
-                } else if let Some(v) = literal_value(t) {
+                } else {
+                    let v = literal_value(t)?;
                     values.push(v);
                     k += 1;
-                } else {
-                    return None;
                 }
             }
         }
