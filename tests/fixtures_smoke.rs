@@ -48,6 +48,8 @@ const PAIRS: &[(&str, &str)] = &[
     ("unterminated_comment", "unterminated_comment"),
     ("star_comment_swallows_code", "star_comment_swallows_code"),
     ("source_headers", "source_headers"),
+    ("unbalanced_do_block", "unbalanced_do_block"),
+    ("unbalanced_do_block", "unbalanced_do_block_stray_end"),
 ];
 
 #[test]
