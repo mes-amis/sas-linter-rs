@@ -35,6 +35,10 @@ const GAP: usize = 2;
 ///
 /// A line holding nothing but several complete `**…**;` comments is
 /// first split into one comment per line.
+///
+/// A block whose lines already share one uniform width is left
+/// byte-identical — it was laid out deliberately, and there is nothing
+/// to fix.
 pub fn align_comment_banners(source: &str) -> String {
     let source = split_stacked_banner_comments(source);
     let source = source.as_str();
@@ -301,6 +305,24 @@ fn render_banner_block(lines: &[(&str, &str)], rows: &[Option<BannerRow>], out: 
         .count();
     // A lone `**  NOTE  **;` line is not a banner box — leave it alone.
     if rows.len() < 2 || content_rows == 0 {
+        for (body, term) in lines {
+            out.push_str(body);
+            out.push_str(term);
+        }
+        return;
+    }
+
+    // A block whose lines already share one uniform width is a
+    // deliberately laid-out box: the `**;` terminators align and every
+    // line was hand-padded to hit the same edge. There is nothing to
+    // repair, and re-deriving cell columns risks misreading intentional
+    // layout — a table header with a different cell count than its data
+    // rows, or a full-width cell whose value sits one space away — and
+    // rewriting the whole banner around the misread. Leave it
+    // byte-identical.
+    let mut line_widths = lines.iter().map(|(body, _)| char_len(body.trim_end()));
+    let first_width = line_widths.next().unwrap();
+    if line_widths.all(|w| w == first_width) {
         for (body, term) in lines {
             out.push_str(body);
             out.push_str(term);
@@ -590,6 +612,38 @@ mod tests {
         let v1 = lines[4].find("18-120").unwrap();
         let v2 = lines[5].find("1-3").unwrap();
         assert_eq!(v1, v2, "got:\n{out}");
+    }
+
+    #[test]
+    fn already_rectangular_banner_is_left_alone() {
+        // Every line shares one width: the box was laid out by hand and
+        // must stay byte-identical. The rows are shapes the column
+        // re-derivation used to mangle — a table header whose cell count
+        // differs from its data rows, a row whose long first cell sits a
+        // single space from its value, and a label group whose values
+        // were deliberately not column-aligned.
+        let width = 66;
+        let border = format!("{};\n", "*".repeat(width - 1));
+        let divider = format!("** {} **;\n", "-".repeat(width - 7));
+        let content = |s: &str| {
+            let mut l = format!("**{s}");
+            while l.chars().count() < width - 3 {
+                l.push(' ');
+            }
+            l.push_str("**;\n");
+            l
+        };
+        let src = format!(
+            "{border}{}{}{}{}{}{}{}{border}",
+            content("  ASSUMPTIONS:  NONE"),
+            content("  ALGORITHM:        Output follows a decision tree"),
+            divider,
+            content("       DESCRIPTION                  NAME     VALUES   NOTES"),
+            content("   A description too long for its column xQ7a  0,1"),
+            content("   Short description                xQ7b     0-5"),
+            content("   Another description              xQ8a     0,1,8"),
+        );
+        assert_eq!(align_comment_banners(&src), src);
     }
 
     #[test]

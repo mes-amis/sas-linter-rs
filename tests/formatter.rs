@@ -30,6 +30,21 @@ fn banner_alignment_is_on_by_default() {
 }
 
 #[test]
+fn rectangular_banner_is_not_reflowed() {
+    // A banner box whose lines all share one width was padded by hand;
+    // the default banner pass must leave it byte-identical instead of
+    // re-deriving its columns.
+    let f = fmt_from_yaml("");
+    let src = "\
+*******************************************;\n\
+**  PROGRAM:   EXAMPLE.txt               **;\n\
+**  BY:              A. Person           **;\n\
+**   Short description     xQ7b   0-5    **;\n\
+*******************************************;\n";
+    assert_eq!(f.format(src), src);
+}
+
+#[test]
 fn assignment_alignment_is_on_by_default() {
     let f = fmt_from_yaml("");
     let src = "a    =    a;  **first;\n\nlonger  =  longer; **second;\n";
