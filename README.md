@@ -117,6 +117,9 @@ rules:
   unreachable_inner_branch_value:
     enabled: true              # default for every rule
 
+  unreachable_else_if_branch:
+    enabled: true
+
   identical_if_else_branches:
     enabled: true
 
@@ -251,6 +254,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | rule id | description |
 |---|---|
 | `unreachable_inner_branch_value` | Outer `if VAR in (S) then do;` guards an inner branch whose comparison values aren't all in `S`. |
+| `unreachable_else_if_branch` | An `else if` arm whose condition is already covered by an earlier arm of the same `if` / `else if` chain, so it can never fire. Catches exact repeats (conjunct order, `in (…)` order, case and whitespace ignored) and subsumption — a smaller `in` set, a narrower `lt`/`le`/`gt`/`ge` range, or a point value inside an earlier range, on the same variable. Arms with function calls, `or`, negation or arithmetic are only matched by an exact repeat; each nested chain is checked on its own. Report-only. |
 | `identical_if_else_branches` | `if COND then S; else S;` with identical bodies — almost always a copy-paste error. |
 | `commented_out_guard` | SAS line-comment `* if ... then do;` pattern indicating a disabled outer validity guard. |
 | `choose_one_template` | `** CHOOSE ONE OF THE BELOW STATEMENTS;` banner indicating a broken-by-default source. |

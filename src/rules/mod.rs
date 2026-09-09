@@ -21,6 +21,7 @@ pub mod star_comment_swallows_code;
 pub mod tab_expansion;
 pub mod trailing_whitespace;
 pub mod unbalanced_do_block;
+pub mod unreachable_else_if_branch;
 pub mod unreachable_inner_branch_value;
 pub mod unterminated_comment;
 pub mod variable_value_out_of_known_range;
@@ -59,6 +60,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         unterminated_comment::meta(),
         star_comment_swallows_code::meta(),
         unbalanced_do_block::meta(),
+        unreachable_else_if_branch::meta(),
     ]
 }
 
