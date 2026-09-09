@@ -8,25 +8,52 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries for:
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.3.5**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
-| target                          | runs on             |
-|---------------------------------|---------------------|
-| `aarch64-apple-darwin`          | macOS (Apple Silicon) |
-| `x86_64-apple-darwin`           | macOS (Intel)       |
-| `x86_64-unknown-linux-musl`     | Linux x86_64        |
-| `aarch64-unknown-linux-musl`    | Linux arm64         |
-| `x86_64-pc-windows-msvc`        | Windows x86_64      |
+**macOS (Apple Silicon)**
 
 ```sh
-# Pick the artifact for your platform, drop it on $PATH:
-curl -fsSL -o sas-lint \
-  https://github.com/mes-amis/sas-linter-rs/releases/latest/download/sas-lint-<TAG>-<TARGET>
-chmod +x sas-lint
-./sas-lint --list-rules
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.3.5/sas-lint-v0.3.5-aarch64-apple-darwin
+chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
+sas-lint --version
 ```
 
-On Windows, grab `sas-lint-<TAG>-x86_64-pc-windows-msvc.exe` from the release page and put it somewhere on `%PATH%`.
+**macOS (Intel)**
+
+```sh
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.3.5/sas-lint-v0.3.5-x86_64-apple-darwin
+chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
+sas-lint --version
+```
+
+**Linux (x86_64)**
+
+```sh
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.3.5/sas-lint-v0.3.5-x86_64-unknown-linux-musl
+chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
+sas-lint --version
+```
+
+**Linux (arm64)**
+
+```sh
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.3.5/sas-lint-v0.3.5-aarch64-unknown-linux-musl
+chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
+sas-lint --version
+```
+
+**Windows (x86_64, PowerShell)**
+
+```powershell
+$dir = "$env:LOCALAPPDATA\sas-lint"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.3.5/sas-lint-v0.3.5-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
+& "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
+```
+
+Each asset ships with a `.sha256` next to it on the release page. The binaries have no runtime dependencies (`musl` on Linux), so drop-in anywhere on `PATH` works too.
 
 ### From source
 
@@ -45,13 +72,20 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
+The current extension release is **vscode-v0.3.3** (also kept in step by `tests/release_versions.rs`).
+
+**macOS / Linux**
+
 ```sh
-# Install from the command line (substitute the current vscode-v* tag and matching version):
-TAG=vscode-v0.3.0
-VER=0.3.0
-curl -fsSL -o /tmp/sas-linter-vscode.vsix \
-  "https://github.com/mes-amis/sas-linter-rs/releases/download/${TAG}/sas-linter-vscode-${VER}.vsix"
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.3/sas-linter-vscode-0.3.3.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.3/sas-linter-vscode-0.3.3.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 
 With the [GitHub CLI](https://cli.github.com/), pick up the latest extension release automatically:
@@ -116,6 +150,9 @@ rules:
   # ── Structural / semantic rules ─────────────────────────────────────
   unreachable_inner_branch_value:
     enabled: true              # default for every rule
+
+  unreachable_else_if_branch:
+    enabled: true
 
   identical_if_else_branches:
     enabled: true
@@ -251,6 +288,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | rule id | description |
 |---|---|
 | `unreachable_inner_branch_value` | Outer `if VAR in (S) then do;` guards an inner branch whose comparison values aren't all in `S`. |
+| `unreachable_else_if_branch` | An `else if` arm whose condition is already covered by an earlier arm of the same `if` / `else if` chain, so it can never fire. Catches exact repeats (conjunct order, `in (…)` order, case and whitespace ignored) and subsumption — a smaller `in` set, a narrower `lt`/`le`/`gt`/`ge` range, or a point value inside an earlier range, on the same variable. Arms with function calls, `or`, negation or arithmetic are only matched by an exact repeat; each nested chain is checked on its own. Report-only. |
 | `identical_if_else_branches` | `if COND then S; else S;` with identical bodies — almost always a copy-paste error. |
 | `commented_out_guard` | SAS line-comment `* if ... then do;` pattern indicating a disabled outer validity guard. |
 | `choose_one_template` | `** CHOOSE ONE OF THE BELOW STATEMENTS;` banner indicating a broken-by-default source. |
