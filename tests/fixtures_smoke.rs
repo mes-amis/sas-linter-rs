@@ -3,10 +3,10 @@
 //! convention: lint fixtures must produce ≥1 finding from the rule
 //! under test; clean fixtures must be silent.
 //!
-//! Fixture subdir → rule id mapping. Most are 1:1; the two prefixed
-//! exceptions (`unreachable_inner`, `unreachable_inner_eq`) both map
-//! to `unreachable_inner_branch_value`, and `malformed_if_condition_cascade`
-//! piggybacks on `malformed_if_condition`.
+//! Fixture subdir → rule id mapping. Most are 1:1; the prefixed
+//! exceptions (`unreachable_inner`, `unreachable_inner_eq`,
+//! `unreachable_inner_conjunct`) all map to `unreachable_inner_branch_value`,
+//! and `malformed_if_condition_cascade` piggybacks on `malformed_if_condition`.
 
 use std::path::PathBuf;
 
@@ -43,6 +43,10 @@ const PAIRS: &[(&str, &str)] = &[
     ("choose_one_template", "choose_one_template"),
     ("unreachable_inner_branch_value", "unreachable_inner"),
     ("unreachable_inner_branch_value", "unreachable_inner_eq"),
+    (
+        "unreachable_inner_branch_value",
+        "unreachable_inner_conjunct",
+    ),
     ("format_for_unknown_variable", "format_for_unknown_variable"),
     ("inconsistent_variable_case", "inconsistent_variable_case"),
     ("unterminated_comment", "unterminated_comment"),
