@@ -11,8 +11,9 @@ use super::RuleMeta;
 pub struct UnreachableInnerBranchValue;
 
 const ID: &str = "unreachable_inner_branch_value";
-const DESCRIPTION: &str = "Inner branch references a value that the enclosing \
-                            outer guard excludes — branch is unreachable for that value.";
+const DESCRIPTION: &str = "Inner branch tests a variable against a value that the \
+                            enclosing `if VAR in (...) then do;` guard excludes — the \
+                            branch can never fire for that value.";
 
 pub fn meta() -> RuleMeta {
     RuleMeta {
@@ -66,13 +67,12 @@ impl Rule for UnreachableInnerBranchValue {
             let tok = &tokens[i];
             match tok.token_type {
                 TokenType::KwIf => {
-                    let (consumed, frame, inner) =
+                    let (consumed, frames, inner) =
                         analyze_if(tokens, i, do_depth, &stack, ctx.path);
                     findings.extend(inner);
-                    if let Some(f) = frame {
-                        stack.push(f);
-                        do_depth += 1;
-                    }
+                    // Frames take effect inside the `do;` that follows the
+                    // `then`; the `do` itself is left for the arm below.
+                    stack.extend(frames);
                     i += consumed;
                     continue;
                 }
@@ -104,67 +104,166 @@ impl Rule for UnreachableInnerBranchValue {
     }
 }
 
+/// Operators that make a condition a disjunction. `and` binds tighter than
+/// `or`, so once one of these appears at the top level the condition can no
+/// longer be read as a set of independent tests: a dead value in one
+/// disjunct doesn't make the branch unreachable, and as a guard it doesn't
+/// restrict anything.
+const DISJUNCTION_OPS: &[TokenType] = &[
+    TokenType::KwOR,
+    TokenType::PIPE,
+    TokenType::PIPE2,
+    TokenType::EXCL,
+    TokenType::EXCL2,
+    TokenType::AMP,
+];
+
+/// One `VAR in (…)` / `VAR = lit` test lifted out of a condition.
+struct Comparison {
+    var: String,
+    display: String,
+    values: Vec<LitValue>,
+}
+
+/// Analyse the `if` at `i`. Returns how many tokens to skip (the condition,
+/// up to but not including `then`), the guard frames the statement opens if
+/// it is a `then do;` block, and the findings for values the enclosing
+/// guards exclude.
 fn analyze_if(
     tokens: &[Token],
     i: usize,
     do_depth: i32,
     stack: &[GuardFrame],
     path: &str,
-) -> (usize, Option<GuardFrame>, Vec<Finding>) {
-    let Some(ident) = tokens.get(i + 1) else {
-        return (1, None, vec![]);
+) -> (usize, Vec<GuardFrame>, Vec<Finding>) {
+    let Some(then_idx) = find_then(tokens, i + 1) else {
+        return (1, vec![], vec![]);
     };
-    if ident.token_type != TokenType::Identifier {
-        return (1, None, vec![]);
-    }
-    let var = ident.text.to_lowercase();
-    let Some(op) = tokens.get(i + 2) else {
-        return (1, None, vec![]);
-    };
-
-    let Some((values, end_of_cond)) = parse_comparison(tokens, i + 2, op) else {
-        return (1, None, vec![]);
-    };
-
-    let then_pos = end_of_cond;
-    let is_outer_guard = tokens.get(then_pos).map(|t| t.token_type) == Some(TokenType::KwThen)
-        && tokens.get(then_pos + 1).map(|t| t.token_type) == Some(TokenType::KwDo)
-        && tokens.get(then_pos + 2).map(|t| t.token_type) == Some(TokenType::SEMI);
+    let cond = &tokens[i + 1..then_idx];
+    let is_guard = tokens.get(then_idx + 1).map(|t| t.token_type) == Some(TokenType::KwDo)
+        && tokens.get(then_idx + 2).map(|t| t.token_type) == Some(TokenType::SEMI);
 
     let mut findings = Vec::new();
-    if !is_outer_guard {
-        if let Some(frame) = stack.iter().rev().find(|f| f.var == var) {
-            for val in &values {
-                if !frame.allowed.contains(&val.key) {
-                    findings.push(Finding {
-                        path: path.to_string(),
-                        line: val.line,
-                        column: val.column,
-                        rule: ID,
-                        message: format!(
-                            "value {} for {} is excluded by the enclosing \
-                             `if {} in (...)` guard at line {}; this branch is unreachable.",
-                            val.display, ident.text, ident.text, frame.line
-                        ),
-                        severity: Severity::Warning,
-                    });
-                }
+    let mut frames = Vec::new();
+    for cmp in conjunct_comparisons(cond) {
+        if let Some(frame) = stack.iter().rev().find(|f| f.var == cmp.var) {
+            let dead: Vec<&LitValue> = cmp
+                .values
+                .iter()
+                .filter(|v| !frame.allowed.contains(&v.key))
+                .collect();
+            // Every value excluded: the test can never be true, so the
+            // whole branch is dead. Some excluded: the branch still fires
+            // for the live values, only the dead ones are noise.
+            let verdict = if dead.len() == cmp.values.len() {
+                "this branch is unreachable."
+            } else {
+                "this branch can never fire for that value."
+            };
+            for val in dead {
+                findings.push(Finding {
+                    path: path.to_string(),
+                    line: val.line,
+                    column: val.column,
+                    rule: ID,
+                    message: format!(
+                        "value {} for {} is excluded by the enclosing \
+                         `if {} in (...)` guard at line {}; {}",
+                        val.display, cmp.display, cmp.display, frame.line, verdict
+                    ),
+                    severity: Severity::Warning,
+                });
             }
         }
+        if is_guard {
+            frames.push(GuardFrame {
+                var: cmp.var,
+                allowed: cmp.values.iter().map(|v| v.key.clone()).collect(),
+                depth: do_depth + 1,
+                line: tokens[i].start_line,
+            });
+        }
     }
+    (then_idx - i, frames, findings)
+}
 
-    let mut new_frame = None;
-    let mut consumed = end_of_cond - i;
-    if is_outer_guard {
-        new_frame = Some(GuardFrame {
-            var,
-            allowed: values.iter().map(|v| v.key.clone()).collect(),
-            depth: do_depth + 1,
-            line: tokens[i].start_line,
-        });
-        consumed = (then_pos + 3) - i;
+/// Index of the `then` closing the condition that starts at `i`, or `None`
+/// if a `;` (or EOF) comes first.
+fn find_then(tokens: &[Token], i: usize) -> Option<usize> {
+    tokens[i..]
+        .iter()
+        .position(|t| matches!(t.token_type, TokenType::KwThen | TokenType::SEMI))
+        .map(|p| i + p)
+        .filter(|&j| tokens[j].token_type == TokenType::KwThen)
+}
+
+/// The `VAR in (…)` / `VAR = lit` tests in a condition, one per top-level
+/// `and` conjunct. Conjuncts of any other shape (`not`, `ne`, ranges,
+/// function calls, …) are skipped; a top-level disjunction yields nothing.
+fn conjunct_comparisons(cond: &[Token]) -> Vec<Comparison> {
+    let cond = strip_outer_parens(cond);
+    let mut parts: Vec<&[Token]> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (j, t) in cond.iter().enumerate() {
+        match t.token_type {
+            TokenType::LPAREN => depth += 1,
+            TokenType::RPAREN => depth = depth.saturating_sub(1),
+            TokenType::KwAND if depth == 0 => {
+                parts.push(&cond[start..j]);
+                start = j + 1;
+            }
+            ty if depth == 0 && DISJUNCTION_OPS.contains(&ty) => return Vec::new(),
+            _ => {}
+        }
     }
-    (consumed, new_frame, findings)
+    parts.push(&cond[start..]);
+
+    parts
+        .into_iter()
+        .filter_map(|part| {
+            let part = strip_outer_parens(part);
+            let ident = part
+                .first()
+                .filter(|t| t.token_type == TokenType::Identifier)?;
+            let op = part.get(1)?;
+            let (values, end) = parse_comparison(part, 1, op)?;
+            // The comparison must be the whole conjunct — `e in (9) + 1`
+            // or `e = 1 - x` is arithmetic, not a set test.
+            (end == part.len()).then(|| Comparison {
+                var: ident.text.to_lowercase(),
+                display: ident.text.clone(),
+                values,
+            })
+        })
+        .collect()
+}
+
+/// Peel `( … )` pairs that enclose the entire slice.
+fn strip_outer_parens(mut toks: &[Token]) -> &[Token] {
+    loop {
+        let n = toks.len();
+        if n < 2
+            || toks[0].token_type != TokenType::LPAREN
+            || toks[n - 1].token_type != TokenType::RPAREN
+        {
+            return toks;
+        }
+        let mut depth = 0usize;
+        for (j, t) in toks.iter().enumerate() {
+            match t.token_type {
+                TokenType::LPAREN => depth += 1,
+                TokenType::RPAREN => {
+                    depth -= 1;
+                    if depth == 0 && j != n - 1 {
+                        return toks;
+                    }
+                }
+                _ => {}
+            }
+        }
+        toks = &toks[1..n - 1];
+    }
 }
 
 fn parse_comparison(tokens: &[Token], op_idx: usize, op: &Token) -> Option<(Vec<LitValue>, usize)> {
