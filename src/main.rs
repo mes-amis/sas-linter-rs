@@ -22,9 +22,9 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     rules: Option<Vec<String>>,
 
-    /// Reformat file(s) in place. Not yet implemented — accepted for
-    /// CLI compatibility with the Ruby gem; will be wired up after the
-    /// formatter port lands.
+    /// Reformat file(s) in place (keyword casing, operator spacing,
+    /// indent, comment/assignment alignment), then apply autofix-enabled
+    /// rules.
     #[arg(long)]
     format: bool,
 
