@@ -1,6 +1,6 @@
 use crate::config::{opt_bool, opt_i64};
 use crate::finding::{Finding, Severity};
-use crate::rule::{CheckContext, Rule};
+use crate::rule::{CheckContext, Hook, Rule};
 
 use super::RuleMeta;
 
@@ -49,6 +49,9 @@ impl Rule for TabExpansion {
     }
     fn autofix_enabled(&self) -> bool {
         self.autofix
+    }
+    fn hook(&self) -> Hook {
+        Hook::BeforeFormat
     }
 
     /// One finding per tab character. Column is the 1-based character

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{opt_bool, opt_map_str_str};
 use crate::finding::{Finding, Severity};
-use crate::rule::{CheckContext, Rule};
+use crate::rule::{CheckContext, Hook, Rule};
 
 use super::RuleMeta;
 
@@ -111,6 +111,9 @@ impl Rule for EncodingIssues {
     }
     fn autofix_enabled(&self) -> bool {
         self.autofix
+    }
+    fn hook(&self) -> Hook {
+        Hook::BeforeFormat
     }
 
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {

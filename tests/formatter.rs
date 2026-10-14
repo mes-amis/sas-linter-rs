@@ -2,7 +2,7 @@
 //! indentation. Sources are short generic snippets, written inline so
 //! the test stays portable and contains no real variable codes.
 
-use sas_linter::{Config, Formatter};
+use sas_linter::{Config, Formatter, Linter};
 
 fn fmt_from_yaml(yaml: &str) -> Formatter {
     let cfg: Config = serde_yaml::from_str(yaml).expect("config parses");
@@ -142,4 +142,39 @@ format:
     let src = "data foo;\nb =\n  1;\nrun;\n";
     let out = f.format(src);
     assert!(out.contains("=\n  1"), "got: {:?}", out);
+}
+
+fn format_with(yaml: &str, src: &str) -> String {
+    let cfg: Config = serde_yaml::from_str(yaml).expect("config parses");
+    let linter = Linter::from_config(&cfg).expect("linter builds");
+    let formatter = Formatter::from_config(&cfg).expect("formatter builds");
+    linter.format_source(src, &formatter)
+}
+
+const TAB_AUTOFIX: &str = "rules:\n  tab_expansion:\n    autofix: true\n";
+
+#[test]
+fn tab_expansion_runs_before_format_so_one_pass_settles() {
+    // Alignment measured against a raw tab would be thrown off once the
+    // tab is expanded, needing a second save to settle.
+    let src = "data a;\n  x\t= 1;\n  longname = 2;\n  ab\t\t= 3;\nrun;\n";
+    let once = format_with(TAB_AUTOFIX, src);
+    assert!(!once.contains('\t'), "got:\n{once}");
+    assert_eq!(format_with(TAB_AUTOFIX, &once), once);
+    assert!(once.contains("  x        = 1;\n"), "got:\n{once}");
+}
+
+#[test]
+fn hook_after_format_overrides_the_default() {
+    let yaml = "rules:\n  tab_expansion:\n    autofix: true\n    hook: after_format\n";
+    let src = "data a;\n\tx\t= 1;\n  longname = 2;\n  ab\t\t= 3;\nrun;\n";
+    assert_ne!(format_with(yaml, src), format_with(TAB_AUTOFIX, src));
+}
+
+#[test]
+fn unknown_hook_is_rejected() {
+    let cfg: Config =
+        serde_yaml::from_str("rules:\n  tab_expansion:\n    hook: sometime\n").unwrap();
+    let err = Linter::from_config(&cfg).err().expect("bad hook errors");
+    assert!(err.to_string().contains("tab_expansion.hook"), "got: {err}");
 }

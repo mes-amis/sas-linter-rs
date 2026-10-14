@@ -10,6 +10,26 @@ pub struct CheckContext<'a> {
     pub path: &'a str,
 }
 
+/// Autofix phase relative to the formatter (`hook:` config option).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hook {
+    BeforeFormat,
+    AfterFormat,
+}
+
+impl Hook {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "before_format" => Ok(Hook::BeforeFormat),
+            "after_format" => Ok(Hook::AfterFormat),
+            other => anyhow::bail!(
+                "hook must be 'before_format' or 'after_format' (got '{}')",
+                other
+            ),
+        }
+    }
+}
+
 /// Rule lifecycle:
 ///
 /// * `id` / `description` / `severity` / `supports_autofix` are class-level
@@ -30,6 +50,14 @@ pub trait Rule: Send + Sync {
     }
     fn autofix_enabled(&self) -> bool {
         false
+    }
+    /// When this rule's autofix runs in `--format` mode. Byte-level
+    /// normalizations (encoding, line endings, tabs) default to
+    /// `BeforeFormat`: the formatter measures columns and splits lines,
+    /// so fixing them afterwards leaves its output unsettled until a
+    /// second save. Overridable per rule via `hook:` in the config.
+    fn hook(&self) -> Hook {
+        Hook::AfterFormat
     }
     fn check(&self, ctx: &CheckContext) -> Vec<Finding>;
     fn autofix(&self, source: &str) -> String {

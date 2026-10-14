@@ -1,6 +1,6 @@
 use crate::config::opt_bool;
 use crate::finding::{Finding, Severity};
-use crate::rule::{CheckContext, Rule};
+use crate::rule::{CheckContext, Hook, Rule};
 
 use super::RuleMeta;
 
@@ -37,6 +37,9 @@ impl Rule for LineEndings {
     }
     fn autofix_enabled(&self) -> bool {
         self.autofix
+    }
+    fn hook(&self) -> Hook {
+        Hook::BeforeFormat
     }
 
     /// Two patterns matter:

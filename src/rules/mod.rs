@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 
-use crate::config::Config;
-use crate::rule::Rule;
+use crate::config::{opt_str, Config};
+use crate::finding::Finding;
+use crate::rule::{CheckContext, Hook, Rule};
 
 pub mod choose_one_template;
 pub mod commented_out_guard;
@@ -98,7 +99,14 @@ pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
                 known.join(", ")
             )
         })?;
-        out.push((m.config_factory)(opts)?);
+        let rule = (m.config_factory)(opts)?;
+        out.push(match opt_str(opts, "hook") {
+            Some(h) => Box::new(HookOverride {
+                inner: rule,
+                hook: Hook::parse(h).map_err(|e| anyhow!("{}.{}", id, e))?,
+            }),
+            None => rule,
+        });
     }
 
     // Pass 2: rules not mentioned in config — default options. Matches
@@ -111,4 +119,38 @@ pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
     }
 
     Ok(out)
+}
+
+/// Applies a config-level `hook:` to any rule without each rule's factory
+/// having to parse it. Everything else delegates to the wrapped rule.
+struct HookOverride {
+    inner: Box<dyn Rule>,
+    hook: Hook,
+}
+
+impl Rule for HookOverride {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn description(&self) -> &'static str {
+        self.inner.description()
+    }
+    fn severity(&self) -> crate::finding::Severity {
+        self.inner.severity()
+    }
+    fn supports_autofix(&self) -> bool {
+        self.inner.supports_autofix()
+    }
+    fn autofix_enabled(&self) -> bool {
+        self.inner.autofix_enabled()
+    }
+    fn hook(&self) -> Hook {
+        self.hook
+    }
+    fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
+        self.inner.check(ctx)
+    }
+    fn autofix(&self, source: &str) -> String {
+        self.inner.autofix(source)
+    }
 }

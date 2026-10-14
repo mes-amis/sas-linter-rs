@@ -219,6 +219,7 @@ rules:
     enabled: true
     autofix: false
     width: 8                   # tab stop width
+    hook: before_format        # default for tab_expansion / line_endings / encoding_issues
 
   source_headers:
     enabled: true
@@ -247,6 +248,8 @@ format:
 ```
 
 `enabled` and `autofix` are accepted on every rule. Options not listed above are ignored.
+
+`hook` (`before_format` | `after_format`) is also accepted on every rule and controls when its autofix runs in `--format` mode. `tab_expansion`, `line_endings` and `encoding_issues` default to `before_format`, so the formatter's alignment and indentation see the normalized bytes and a single save settles; every other rule defaults to `after_format`. Plain lint runs (no `--format`) ignore it.
 
 ## Library usage
 
