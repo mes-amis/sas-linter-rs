@@ -50,6 +50,8 @@ Pipeline: **`Config`** (YAML, `src/config.rs`) → **`Linter`** (`src/linter.rs`
 
 Inside `lint_with_fixes`: all rules' `check` runs over the original source first (so findings reflect the pre-fix state); then autofix-enabled rules run **sequentially** over an accumulating string. Order is the rule order in `all_metas()`. If two autofixes interact, that order matters — keep it in mind when adding rewrite rules.
 
+In `--format` mode (`Linter::format_source`) autofixes are split by `Rule::hook()`: `before_format` rules (default for `tab_expansion`, `line_endings`, `encoding_issues`) run before the formatter so its column math sees normalized bytes; everything else runs after. A per-rule `hook:` config key overrides the default (applied via the `HookOverride` wrapper in `src/rules/mod.rs`).
+
 ## Testing conventions
 
 - `tests/fixtures_smoke.rs` — parametric pair runner; the canonical place to add rule coverage.

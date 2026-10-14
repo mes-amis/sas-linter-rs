@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::config::Config;
 use crate::encoding;
 use crate::finding::Finding;
-use crate::rule::{CheckContext, Rule};
+use crate::rule::{CheckContext, Hook, Rule};
 use crate::rules;
 use crate::token::TokenStream;
 
@@ -78,23 +78,38 @@ impl Linter {
         Ok(findings)
     }
 
-    /// Run the formatter against a file, then apply any autofix-enabled
-    /// rules. Mirrors the Ruby gem's `format_file`: formatter passes
-    /// first, then composable rule autofixes, and the file is only
-    /// rewritten if a byte changed. Returns true when the file was
-    /// rewritten.
+    /// Format a source string: `before_format` autofixes (by default
+    /// encoding, line endings, tabs — see `Rule::hook`), then the
+    /// formatter, then the `after_format` autofixes. Normalizing first
+    /// means the formatter's column math sees the final bytes, so one
+    /// save settles.
+    pub fn format_source(&self, source: &str, formatter: &crate::formatter::Formatter) -> String {
+        let modified = self.apply_autofixes(source, Hook::BeforeFormat);
+        let modified = formatter.format(&modified);
+        self.apply_autofixes(&modified, Hook::AfterFormat)
+    }
+
+    /// Run autofix-enabled rules attached to `hook`, sequentially in rule
+    /// order.
+    fn apply_autofixes(&self, source: &str, hook: Hook) -> String {
+        let mut modified = source.to_string();
+        for rule in &self.rules {
+            if rule.autofix_enabled() && rule.supports_autofix() && rule.hook() == hook {
+                modified = rule.autofix(&modified);
+            }
+        }
+        modified
+    }
+
+    /// Run `format_source` against a file. The file is only rewritten if
+    /// a byte changed. Returns true when the file was rewritten.
     pub fn format_file(
         &self,
         path: &Path,
         formatter: &crate::formatter::Formatter,
     ) -> Result<bool> {
         let original = encoding::read_source(path)?;
-        let mut modified = formatter.format(&original);
-        for rule in &self.rules {
-            if rule.autofix_enabled() && rule.supports_autofix() {
-                modified = rule.autofix(&modified);
-            }
-        }
+        let modified = self.format_source(&original, formatter);
         if modified.as_bytes() == original.as_bytes() {
             return Ok(false);
         }
