@@ -20,3 +20,15 @@ if R1 = 1
 **  Multi-line visual comment style — each line is its own **…**; statement   **;
 **              by cognitive status (sCPS) and behavioral problems, then by other **;
 **VARIABLE ASSIGNMENTS**; **PUT YOUR VARIABLES ON THE RIGHT-HAND SIDE HERE**;
+
+** Regression cases for issue #21 — FIRST./LAST. BY-group variables and macro
+   variable references are single operands **;
+if first.grp then cOut = 14;
+if last.year;
+if LAST.year then cOut = 15;
+if first.grp and not last.grp then cOut = 16;
+if &strata=1 then cOut = 17;
+if &strata.=1 then cOut = 18;
+if &prefix._rate=0 then cOut = 19;
+if &a&b=1 then cOut = 20;
+if "&strata"="1" then cOut = 21;
