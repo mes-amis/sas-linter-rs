@@ -4,3 +4,4 @@ if = 1 then cOut = 3;
 if then cOut = 4;
 R1 = 1 then cOut = 5;
 if (R1 = 1 and R2 = 2 then cOut = 6;
+if first.grp last.grp then cOut = 7;

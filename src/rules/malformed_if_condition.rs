@@ -100,6 +100,19 @@ const OPERAND_TOKENS: &[TokenType] = &[
     TokenType::StringExprStart,
 ];
 
+// Tokens that, when byte-adjacent to the previous piece, continue the same
+// operand rather than starting a new one: `first.grp` lexes as
+// Identifier DOT Identifier, and `&prefix._rate` / `&a&b` as a chain of
+// MacroVarResolve / MacroString / MacroVarTerm / Identifier pieces.
+const OPERAND_GLUE: &[TokenType] = &[
+    TokenType::DOT,
+    TokenType::Identifier,
+    TokenType::MacroVarResolve,
+    TokenType::MacroString,
+    TokenType::MacroVarTerm,
+    TokenType::MacroIdentifier,
+];
+
 fn is_binop(t: TokenType) -> bool {
     COMPARISON_OPS.contains(&t) || LOGICAL_OPS.contains(&t) || ARITH_OPS.contains(&t)
 }
@@ -271,7 +284,7 @@ fn analyze_if(
             }
             if OPERAND_TOKENS.contains(&ty) {
                 state = State::ExpectOperator;
-                i += 1;
+                i = operand_end(tokens, i);
                 continue;
             }
             if is_binop(ty) {
@@ -344,6 +357,52 @@ fn analyze_if(
     }
 
     (i, findings)
+}
+
+/// Index just past the operand starting at `start`. A string expression
+/// (`"&strata"`) runs to its matching end quote; otherwise byte-adjacent
+/// name pieces are glued on, so `first.grp`, `&strata.` and `&prefix._rate`
+/// each count as a single operand. After a `.` any word-like token
+/// continues the name (`first.id` lexes the suffix as a keyword).
+fn operand_end(tokens: &[Token], start: usize) -> usize {
+    let mut i = start;
+    if tokens[i].token_type == TokenType::StringExprStart {
+        let mut depth = 0;
+        while i < tokens.len() {
+            match tokens[i].token_type {
+                TokenType::StringExprStart => depth += 1,
+                TokenType::StringExprEnd => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                TokenType::SEMI => return i,
+                _ => {}
+            }
+            i += 1;
+        }
+        return i;
+    }
+    i += 1;
+    while let Some(next) = tokens.get(i) {
+        let prev = &tokens[i - 1];
+        if next.start_byte != prev.end_byte {
+            break;
+        }
+        let after_dot = matches!(prev.token_type, TokenType::DOT | TokenType::MacroVarTerm);
+        let word = !next.text.is_empty()
+            && next
+                .text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if OPERAND_GLUE.contains(&next.token_type) || (after_dot && word) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
 }
 
 fn flag_terminal(
