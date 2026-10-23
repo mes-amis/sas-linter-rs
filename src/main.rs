@@ -57,10 +57,17 @@ enum Command {
     /// builds per-input value sets (seeded from the
     /// `variable_value_out_of_known_range` metadata CSVs in --config, when
     /// configured), and writes --size sampled rows per source. Each row
-    /// is drawn from one of five strategies: baseline (everything at
-    /// default), single (satisfy one predicate), combo (satisfy 2–6 at
-    /// once), perturbation (baseline plus a few random cell flips), and
-    /// chaos (uniform sampling). Deterministic for a given --seed.
+    /// is drawn from one of five strategies, mixed by --weights: baseline
+    /// (everything at default), single (satisfy one predicate), combo
+    /// (satisfy --combo-size predicates at once), perturbation (baseline
+    /// with each cell flipped to random at --perturbation-prob), and chaos
+    /// (uniform sampling).
+    ///
+    /// --minimal replaces the weighted mix with the smallest row set it
+    /// can find that drives every `if` both ways (100% branch coverage),
+    /// sorted by the first branch each row reaches in source order.
+    ///
+    /// Deterministic for a given --seed.
     Synthesize(SynthesizeArgs),
 }
 
@@ -76,6 +83,28 @@ struct SynthesizeArgs {
           value_parser = clap::value_parser!(u64).range(1..))]
     size: u64,
 
+    /// Strategy mix as `name=weight,…` over baseline, single, combo,
+    /// perturbation, and chaos. Weights are relative (they need not sum
+    /// to 1); strategies left out get 0. E.g. `--weights single=3,combo=1`.
+    #[arg(long, value_name = "MIX", default_value_t = synthesize::Weights::default())]
+    weights: synthesize::Weights,
+
+    /// Chance (0–1) that each cell of a perturbation row is redrawn at
+    /// random.
+    #[arg(long, value_name = "P", default_value_t = synthesize::DEFAULT_PERTURBATION_PROB,
+          value_parser = parse_probability)]
+    perturbation_prob: f64,
+
+    /// Predicates satisfied per combo row: `MIN-MAX`, or `N` for exactly N.
+    #[arg(long, value_name = "RANGE", default_value_t = synthesize::ComboSizes::default())]
+    combo_size: synthesize::ComboSizes,
+
+    /// Emit the fewest rows covering every `if` branch outcome, in
+    /// execution order, instead of --size weighted samples. Outcomes no
+    /// row can reach are reported on stderr.
+    #[arg(long, conflicts_with_all = ["size", "weights", "perturbation_prob", "combo_size"])]
+    minimal: bool,
+
     /// RNG seed.
     #[arg(long, default_value_t = synthesize::DEFAULT_SEED)]
     seed: u64,
@@ -88,6 +117,13 @@ struct SynthesizeArgs {
     /// SAS source files.
     #[arg(required = true)]
     sources: Vec<PathBuf>,
+}
+
+fn parse_probability(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(p) if (0.0..=1.0).contains(&p) => Ok(p),
+        _ => Err(format!("`{s}` is not a probability between 0 and 1")),
+    }
 }
 
 fn main() -> ExitCode {
@@ -213,7 +249,19 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
             continue;
         }
         let text = read_source(source).with_context(|| format!("reading {}", source.display()))?;
-        let result = synthesize::sample(&text, &specs, args.size as usize, args.seed);
+        let (result, coverage) = if args.minimal {
+            let (result, coverage) = synthesize::minimal(&text, &specs, args.seed);
+            (result, Some(coverage))
+        } else {
+            let mix = synthesize::Mix {
+                weights: args.weights.clone(),
+                perturbation_prob: args.perturbation_prob,
+                combo_sizes: args.combo_size.clone(),
+            };
+            let result =
+                synthesize::sample_with(&text, &specs, args.size as usize, args.seed, &mix);
+            (result, None)
+        };
         let out_path = if single_file {
             args.output.clone()
         } else {
@@ -224,12 +272,23 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
         result
             .write_csv(BufWriter::new(file))
             .with_context(|| format!("writing {}", out_path.display()))?;
+        let covers = match &coverage {
+            Some(c) => format!(" (covers {}/{} branch outcomes)", c.covered(), c.total),
+            None => String::new(),
+        };
         println!(
-            "Wrote {} row(s) over {} input(s) to {}",
+            "Wrote {} row(s) over {} input(s) to {}{covers}",
             result.rows.len(),
             result.headers.len(),
             out_path.display()
         );
+        for (line, outcome) in coverage.iter().flat_map(|c| &c.uncovered) {
+            eprintln!(
+                "sas-lint synthesize: {}:{line}: no row reaches the {} branch",
+                source.display(),
+                if *outcome { "true" } else { "false" }
+            );
+        }
     }
     Ok(ExitCode::from(exit_code))
 }
