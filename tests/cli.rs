@@ -218,3 +218,68 @@ fn synthesize_rejects_bad_mix_options() {
         assert_eq!(out.status.code(), Some(2), "{bad:?}");
     }
 }
+
+#[test]
+fn synthesize_minimal_adds_catalog_boundary_values() {
+    let tmp = synth_tmp("boundaries");
+    std::fs::write(
+        tmp.join("catalog.csv"),
+        "iCode;Acceptable Values\na;0-2\nb;0-3\nw;0.5-1.5\n",
+    )
+    .unwrap();
+    let cfg = tmp.join("lint.yaml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "rules:\n  variable_value_out_of_known_range:\n    enabled: false\n    \
+             csv_paths: [{}]\n    name_column: iCode\n    delimiter: \";\"\n",
+            tmp.join("catalog.csv").display()
+        ),
+    )
+    .unwrap();
+    let src = tmp.join("algo.sas");
+    std::fs::write(
+        &src,
+        "if a in (0,1,2) and b in (0,1,2,3) then do;\n  \
+         if a in (1,2) or b = 3 then c = 1;\nend;\nif w gt 1 then d = 1;\n",
+    )
+    .unwrap();
+    let target = tmp.join("min.csv");
+    let out = Command::new(bin())
+        .args(["synthesize", "--minimal", "--config"])
+        .arg(&cfg)
+        .arg("-o")
+        .arg(&target)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout)
+        .contains("(covers 6/6 branch outcomes, 12 boundary values)"));
+    let csv = std::fs::read_to_string(target).unwrap();
+    let mut lines = csv.lines();
+    assert_eq!(lines.next(), Some("a,b,w"));
+    let rows: Vec<Vec<String>> = lines
+        .map(|l| l.split(',').map(String::from).collect())
+        .collect();
+    let column = |i: usize| -> Vec<&str> { rows.iter().map(|r| r[i].as_str()).collect() };
+    for (i, edges) in [
+        (0, &["-1", "0", "2", "3"][..]),
+        (1, &["-1", "0", "3", "4"]),
+        (2, &["0.4", "0.5", "1.5", "1.6"]),
+    ] {
+        for e in edges {
+            assert!(
+                column(i).contains(e),
+                "column {i} lacks {e}: {:?}",
+                column(i)
+            );
+        }
+    }
+    // Four distinct edges per input is the floor, and they pack into it.
+    assert_eq!(rows.len(), 4);
+}

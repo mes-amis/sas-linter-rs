@@ -176,40 +176,40 @@ impl VariableValueOutOfKnownRange {
 
 #[derive(Debug)]
 struct Literal {
-    value: i64,
+    value: f64,
     display: String,
 }
 
 fn literal_value(t: &Token) -> Option<Literal> {
     match t.token_type {
-        TokenType::IntegerLiteral => t.text.parse::<i64>().ok().map(|n| Literal {
-            value: n,
-            display: t.text.clone(),
-        }),
-        TokenType::FloatLiteral => t.text.parse::<f64>().ok().and_then(|f| {
-            if f == f.trunc() && f.is_finite() {
-                Some(Literal {
-                    value: f as i64,
-                    display: t.text.clone(),
-                })
-            } else {
-                None
-            }
-        }),
+        TokenType::IntegerLiteral | TokenType::FloatLiteral => t
+            .text
+            .parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite())
+            .map(|value| Literal {
+                value,
+                display: t.text.clone(),
+            }),
         _ => None,
     }
 }
 
 fn value_allowed(spec: &Spec, lit: &Literal) -> bool {
+    let int = lit.value as i64;
     match &spec.kind {
-        SpecKind::Range(lo, hi) => lit.value >= *lo && lit.value <= *hi,
-        SpecKind::Set(values) => values.contains(&lit.value),
+        SpecKind::Decimal(lo, hi) => lit.value >= *lo && lit.value <= *hi,
+        // Integer catalogs say nothing about fractional literals.
+        _ if lit.value.fract() != 0.0 => true,
+        SpecKind::Range(lo, hi) => int >= *lo && int <= *hi,
+        SpecKind::Set(values) => values.contains(&int),
     }
 }
 
 fn format_message(ident: &str, display: &str, spec: &Spec) -> String {
     let allowed_str = match &spec.kind {
         SpecKind::Range(lo, hi) => format!("{}..{}", lo, hi),
+        SpecKind::Decimal(lo, hi) => format!("{}..{}", lo, hi),
         SpecKind::Set(values) => {
             let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
             format!("{{{}}}", parts.join(", "))

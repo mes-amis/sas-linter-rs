@@ -8,12 +8,12 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.5.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.5.1**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
 **macOS (Apple Silicon)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-aarch64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.1/sas-lint-v0.5.1-aarch64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -21,7 +21,7 @@ sas-lint --version
 **macOS (Intel)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-x86_64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.1/sas-lint-v0.5.1-x86_64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -29,7 +29,7 @@ sas-lint --version
 **Linux (x86_64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-x86_64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.1/sas-lint-v0.5.1-x86_64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -37,7 +37,7 @@ sas-lint --version
 **Linux (arm64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-aarch64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.1/sas-lint-v0.5.1-aarch64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -47,7 +47,7 @@ sas-lint --version
 ```powershell
 $dir = "$env:LOCALAPPDATA\sas-lint"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.1/sas-lint-v0.5.1-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
 & "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
@@ -72,19 +72,19 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
-The current extension release is **vscode-v0.3.9** (also kept in step by `tests/release_versions.rs`).
+The current extension release is **vscode-v0.3.10** (also kept in step by `tests/release_versions.rs`).
 
 **macOS / Linux**
 
 ```sh
-curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.9/sas-linter-vscode-0.3.9.vsix
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.10/sas-linter-vscode-0.3.10.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.9/sas-linter-vscode-0.3.9.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.10/sas-linter-vscode-0.3.10.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
 code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 
@@ -185,7 +185,19 @@ statements. A condition inside an array `do` loop counts as covered when
 any iteration takes the branch. The set comes from a greedy set cover and
 is often, though not provably, the true minimum. Conditions the parser
 can't model (function calls, derived variables) are assumed to hold.
-Stdout reports `covers N/M branch outcomes`, and stderr names each
+
+`--minimal` also puts every input the catalog documents at its
+boundaries, which takes a few extra rows: the minimum and maximum
+documented values, and one step outside each end. For a set like
+`0,1,2,3,8`, the ends are its smallest and largest values. A step is 1
+for integer specs. For decimal ranges it's the finest decimal place of
+the bounds, and at least 0.1. `0-3` therefore yields -1, 0, 3 and 4, and
+`0.5-40.0` yields 0.4, 0.5, 40.0 and 40.1. Boundary values are packed
+into rows that already exist wherever they don't change those rows'
+branch outcomes.
+
+Stdout reports `covers N/M branch outcomes`, plus the number of boundary
+values placed when the catalog documents any input. Stderr names each
 `file:line` outcome that no row reaches, either because the branch is
 unreachable or because it's beyond what the sampler can pin. `--minimal`
 can't be combined with `--size`, `--weights`, `--perturbation-prob` or

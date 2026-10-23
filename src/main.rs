@@ -249,6 +249,11 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
             continue;
         }
         let text = read_source(source).with_context(|| format!("reading {}", source.display()))?;
+        let out_path = if single_file {
+            args.output.clone()
+        } else {
+            out_dir.join(format!("{}.csv", synthesize::output_stem(source)))
+        };
         let (result, coverage) = if args.minimal {
             let (result, coverage) = synthesize::minimal(&text, &specs, args.seed);
             (result, Some(coverage))
@@ -262,17 +267,18 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
                 synthesize::sample_with(&text, &specs, args.size as usize, args.seed, &mix);
             (result, None)
         };
-        let out_path = if single_file {
-            args.output.clone()
-        } else {
-            out_dir.join(format!("{}.csv", synthesize::output_stem(source)))
-        };
         let file =
             File::create(&out_path).with_context(|| format!("creating {}", out_path.display()))?;
         result
             .write_csv(BufWriter::new(file))
             .with_context(|| format!("writing {}", out_path.display()))?;
         let covers = match &coverage {
+            Some(c) if c.boundaries > 0 => format!(
+                " (covers {}/{} branch outcomes, {} boundary values)",
+                c.covered(),
+                c.total,
+                c.boundaries
+            ),
             Some(c) => format!(" (covers {}/{} branch outcomes)", c.covered(), c.total),
             None => String::new(),
         };
