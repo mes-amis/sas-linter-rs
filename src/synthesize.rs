@@ -20,13 +20,21 @@
 //!      a 0-or-empty default. Sum contributors additionally seed
 //!      `0..=threshold`.
 //!
-//! Each row is drawn from one of five strategies (see [`Strategy`]).
-//! Sampling is deterministic for a given seed.
+//! Each row is drawn from one of five strategies (see [`Strategy`]), mixed
+//! by [`Mix`]. Sampling is deterministic for a given seed.
+//!
+//! [`minimal`] is the alternative to weighted sampling: it builds the
+//! smallest row set it can find that drives every `if` both ways (100%
+//! branch coverage of the modelled graph), ordered by the first branch
+//! each row exercises in source order.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Write;
+use std::ops::RangeInclusive;
 use std::path::Path;
+use std::str::FromStr;
 
 use sas_lexer::TokenType;
 
@@ -36,9 +44,10 @@ use crate::value_specs::{SpecKind, ValueSpecs};
 pub const DEFAULT_SIZE: usize = 500;
 pub const DEFAULT_SEED: u64 = 42;
 
-/// Per-row strategy mix. Tuned to get balanced coverage of "no trigger"
-/// vs "single trigger" vs "compound triggers" — uniform random rows tend
-/// to trip many criteria at once and wash out the rarer outcome classes.
+/// Default per-row strategy mix. Tuned to get balanced coverage of "no
+/// trigger" vs "single trigger" vs "compound triggers" — uniform random
+/// rows tend to trip many criteria at once and wash out the rarer outcome
+/// classes.
 const STRATEGY_WEIGHTS: [(Strategy, f64); 5] = [
     (Strategy::Baseline, 0.15),
     (Strategy::Single, 0.45),
@@ -46,17 +55,20 @@ const STRATEGY_WEIGHTS: [(Strategy, f64); 5] = [
     (Strategy::Perturbation, 0.10),
     (Strategy::Chaos, 0.05),
 ];
-/// Per-cell deviate probability inside `Perturbation` rows.
-const PERTURBATION_PROB: f64 = 0.05;
-/// Number of distinct predicates fired per `Combo` row. K∈{2..6} roughly
-/// doubles cumulative-sum coverage versus K≤4 while preserving coverage
-/// of rare output classes; higher K starts collapsing them because
-/// mutually exclusive guards conflict and first-writer-wins biases rows
-/// into the dominant branch.
-const COMBO_SIZES: std::ops::RangeInclusive<usize> = 2..=6;
+/// Default per-cell deviate probability inside `Perturbation` rows.
+pub const DEFAULT_PERTURBATION_PROB: f64 = 0.05;
+/// Default number of distinct predicates fired per `Combo` row. K∈{2..6}
+/// roughly doubles cumulative-sum coverage versus K≤4 while preserving
+/// coverage of rare output classes; higher K starts collapsing them
+/// because mutually exclusive guards conflict and first-writer-wins
+/// biases rows into the dominant branch.
+const COMBO_SIZES: RangeInclusive<usize> = 2..=6;
+/// Random re-tries per placement when [`minimal`] packs a branch outcome
+/// into a row (OR disjuncts, array members, and value picks are random).
+const MINIMAL_ATTEMPTS: usize = 16;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Strategy {
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Strategy {
     /// Everything at default — exercise the "nothing fired" branch.
     Baseline,
     /// Satisfy one predicate, leave the rest at default.
@@ -67,6 +79,146 @@ enum Strategy {
     Perturbation,
     /// Pure uniform sample over each input's value set.
     Chaos,
+}
+
+impl Strategy {
+    pub const ALL: [Strategy; 5] = [
+        Strategy::Baseline,
+        Strategy::Single,
+        Strategy::Combo,
+        Strategy::Perturbation,
+        Strategy::Chaos,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Strategy::Baseline => "baseline",
+            Strategy::Single => "single",
+            Strategy::Combo => "combo",
+            Strategy::Perturbation => "perturbation",
+            Strategy::Chaos => "chaos",
+        }
+    }
+}
+
+/// Relative strategy weights. Parsed from `name=weight,…`; strategies not
+/// named get weight 0, and weights need not sum to 1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Weights([(Strategy, f64); 5]);
+
+impl Default for Weights {
+    fn default() -> Self {
+        Weights(STRATEGY_WEIGHTS)
+    }
+}
+
+impl fmt::Display for Weights {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, (s, w)) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{}={w}", s.name())?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Weights {
+    type Err = String;
+
+    fn from_str(spec: &str) -> Result<Self, String> {
+        let mut weights = Strategy::ALL.map(|s| (s, 0.0));
+        let mut seen = HashSet::new();
+        for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (name, w) = part
+                .split_once('=')
+                .ok_or_else(|| format!("expected `strategy=weight`, got `{part}`"))?;
+            let name = name.trim();
+            let slot = weights
+                .iter_mut()
+                .find(|(s, _)| s.name().eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    let names: Vec<&str> = Strategy::ALL.iter().map(|s| s.name()).collect();
+                    format!(
+                        "unknown strategy `{name}` (expected one of {})",
+                        names.join(", ")
+                    )
+                })?;
+            if !seen.insert(slot.0) {
+                return Err(format!("strategy `{name}` given more than once"));
+            }
+            slot.1 = match w.trim().parse::<f64>() {
+                Ok(x) if x.is_finite() && x >= 0.0 => x,
+                _ => return Err(format!("weight for `{name}` must be a non-negative number")),
+            };
+        }
+        if weights.iter().map(|(_, w)| w).sum::<f64>() <= 0.0 {
+            return Err("at least one strategy needs a positive weight".into());
+        }
+        Ok(Weights(weights))
+    }
+}
+
+/// Inclusive `MIN-MAX` (or a bare `N`) count of predicates per combo row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComboSizes(pub RangeInclusive<usize>);
+
+impl Default for ComboSizes {
+    fn default() -> Self {
+        ComboSizes(COMBO_SIZES)
+    }
+}
+
+impl fmt::Display for ComboSizes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.0.start(), self.0.end())
+    }
+}
+
+impl FromStr for ComboSizes {
+    type Err = String;
+
+    fn from_str(spec: &str) -> Result<Self, String> {
+        let num = |s: &str| {
+            s.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| format!("`{}` is not a positive integer", s.trim()))
+        };
+        let (lo, hi) = match spec.split_once('-') {
+            Some((lo, hi)) => (num(lo)?, num(hi)?),
+            None => {
+                let n = num(spec)?;
+                (n, n)
+            }
+        };
+        if lo > hi {
+            return Err(format!("combo size range {lo}-{hi} is empty"));
+        }
+        Ok(ComboSizes(lo..=hi))
+    }
+}
+
+/// Knobs for [`sample_with`]: the strategy mix plus the per-strategy
+/// parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mix {
+    pub weights: Weights,
+    /// Per-cell deviate probability inside `Perturbation` rows, in `[0, 1]`.
+    pub perturbation_prob: f64,
+    pub combo_sizes: ComboSizes,
+}
+
+impl Default for Mix {
+    fn default() -> Self {
+        Mix {
+            weights: Weights::default(),
+            perturbation_prob: DEFAULT_PERTURBATION_PROB,
+            combo_sizes: ComboSizes::default(),
+        }
+    }
 }
 
 // ── Values ──────────────────────────────────────────────────────────────
@@ -162,11 +314,25 @@ struct ArrayDecl {
     char: bool,
 }
 
+/// One `if` decision point, in source (execution) order. `reach` is every
+/// condition that must hold for control to arrive at the `if`: enclosing
+/// `then do` guards, the negated earlier arms of an `else if` chain, and
+/// any subsetting `if X;` earlier in the same block.
+#[derive(Clone, Debug)]
+struct Branch {
+    line: u32,
+    reach: Vec<Pred>,
+    leaf: Pred,
+}
+
 /// The source's logical graph — inputs, predicates, and per-input value sets.
 #[derive(Debug)]
 pub struct Graph {
     pub inputs: Vec<String>,
     predicates: Vec<Pred>,
+    /// Decision points whose own condition reads an input; the targets
+    /// [`minimal`] covers.
+    branches: Vec<Branch>,
     arrays: HashMap<String, ArrayDecl>,
     value_sets: HashMap<String, Vec<Value>>,
     default_row: HashMap<String, Value>,
@@ -199,24 +365,223 @@ impl Synthesized {
     }
 }
 
-/// Sample `size` rows from `source`'s logical graph. Deterministic for a
-/// given seed.
+/// Sample `size` rows from `source`'s logical graph with the default
+/// [`Mix`]. Deterministic for a given seed.
 pub fn sample(source: &str, specs: &ValueSpecs, size: usize, seed: u64) -> Synthesized {
+    sample_with(source, specs, size, seed, &Mix::default())
+}
+
+/// Sample `size` rows from `source`'s logical graph, drawing each row's
+/// strategy from `mix`. Deterministic for a given seed.
+pub fn sample_with(
+    source: &str,
+    specs: &ValueSpecs,
+    size: usize,
+    seed: u64,
+    mix: &Mix,
+) -> Synthesized {
     let g = build_graph(source, specs);
     let mut rng = Rng::new(seed);
     let rows = (0..size)
-        .map(|_| {
-            let row = sample_row(&g, &mut rng);
-            g.inputs
-                .iter()
-                .map(|h| row.get(h).cloned().unwrap_or(Value::Missing))
-                .collect()
-        })
+        .map(|_| cells(&g, &sample_row(&g, mix, &mut rng)))
         .collect();
     Synthesized {
         headers: g.inputs.clone(),
         rows,
     }
+}
+
+/// Branch outcomes [`minimal`] reached, out of every `if` true/false
+/// outcome in the modelled graph.
+#[derive(Debug, Default)]
+pub struct Coverage {
+    pub total: usize,
+    /// `(source line, outcome)` of each outcome no row reaches — the
+    /// branch is infeasible, or its condition is outside what the sampler
+    /// can pin.
+    pub uncovered: Vec<(u32, bool)>,
+}
+
+impl Coverage {
+    pub fn covered(&self) -> usize {
+        self.total - self.uncovered.len()
+    }
+}
+
+/// The smallest row set found that drives every modelled `if` both ways,
+/// ordered by the first branch outcome each row reaches in source order.
+///
+/// Greedy set cover: outcomes are visited in source order, and each one
+/// not already reached is packed into the earliest row whose pins it
+/// doesn't disturb, else into a fresh row; rows left redundant at the end
+/// are dropped. Unparsed conditions are assumed to hold. Deterministic
+/// for a given seed.
+pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Coverage) {
+    struct Candidate {
+        pins: Row,
+        row: Row,
+        /// Outcomes this row is responsible for; later merges must keep them.
+        keep: Vec<usize>,
+    }
+
+    let g = build_graph(source, specs);
+    let mut rng = Rng::new(seed);
+    let targets: Vec<(usize, bool)> = (0..g.branches.len())
+        .flat_map(|b| [(b, true), (b, false)])
+        .collect();
+    let hit = |row: &Row, t: usize| {
+        let (b, outcome) = targets[t];
+        reaches(&g.branches[b], outcome, row, &g)
+    };
+
+    let mut cands: Vec<Candidate> = Vec::new();
+    for (t, &(b, outcome)) in targets.iter().enumerate() {
+        if let Some(c) = cands.iter_mut().find(|c| hit(&c.row, t)) {
+            c.keep.push(t);
+            continue;
+        }
+        let need = requirement(&g.branches[b], outcome);
+        // Odd attempts pin outer conditions first, for when they're the
+        // tighter bound.
+        let mut reversed = need.clone();
+        if let Pred::And(c) = &mut reversed {
+            c.reverse();
+        }
+        'place: for ci in 0..=cands.len() {
+            for attempt in 0..MINIMAL_ATTEMPTS {
+                let base = cands.get(ci).map(|c| c.pins.clone()).unwrap_or_default();
+                let mut pins = base.clone();
+                let need =
+                    pick_disjuncts(if attempt % 2 == 0 { &need } else { &reversed }, &mut rng);
+                satisfy(&need, &mut pins, &g, &mut rng);
+                repair(&need, &mut pins, &base, &g);
+                let row = materialize(&g, &pins);
+                let keep = cands.get(ci).map_or(&[][..], |c| &c.keep[..]);
+                if !hit(&row, t) || !keep.iter().all(|&k| hit(&row, k)) {
+                    continue;
+                }
+                match cands.get_mut(ci) {
+                    Some(c) => {
+                        c.pins = pins;
+                        c.row = row;
+                        c.keep.push(t);
+                    }
+                    None => cands.push(Candidate {
+                        pins,
+                        row,
+                        keep: vec![t],
+                    }),
+                }
+                break 'place;
+            }
+        }
+    }
+
+    // Drop rows whose every outcome another surviving row also reaches.
+    let reached: Vec<Vec<usize>> = cands
+        .iter()
+        .map(|c| (0..targets.len()).filter(|&t| hit(&c.row, t)).collect())
+        .collect();
+    let mut alive = vec![true; cands.len()];
+    for i in (0..cands.len()).rev() {
+        let redundant = reached[i]
+            .iter()
+            .all(|t| (0..cands.len()).any(|j| j != i && alive[j] && reached[j].contains(t)));
+        if redundant {
+            alive[i] = false;
+        }
+    }
+    let mut order: Vec<usize> = (0..cands.len()).filter(|&i| alive[i]).collect();
+    // Source order of the outcomes each row reaches, earliest first.
+    order.sort_by(|&a, &b| reached[a].cmp(&reached[b]));
+
+    let uncovered = (0..targets.len())
+        .filter(|t| !order.iter().any(|&i| reached[i].contains(t)))
+        .map(|t| (g.branches[targets[t].0].line, targets[t].1))
+        .collect();
+    let mut rows: Vec<Vec<Value>> = order.iter().map(|&i| cells(&g, &cands[i].row)).collect();
+    if rows.is_empty() {
+        rows.push(cells(&g, &g.default_row));
+    }
+    (
+        Synthesized {
+            headers: g.inputs.clone(),
+            rows,
+        },
+        Coverage {
+            total: targets.len(),
+            uncovered,
+        },
+    )
+}
+
+/// `node` with each OR collapsed to one randomly chosen disjunct, so the
+/// result is a plain conjunction [`repair`] sees whole.
+fn pick_disjuncts(node: &Pred, rng: &mut Rng) -> Pred {
+    match node {
+        Pred::Or(c) => rng
+            .choose(c)
+            .map_or(Pred::Tautology, |p| pick_disjuncts(p, rng)),
+        Pred::And(c) => Pred::And(c.iter().map(|p| pick_disjuncts(p, rng)).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Re-pick cells that [`satisfy`]'s first-writer-wins left violating a
+/// conjunct of `need` — e.g. `a ne 0` (an earlier `else` arm) alongside
+/// `a ne 1` needs an `a` outside both lists. Cells already in `base` (a
+/// row's earlier commitments) stay put.
+fn repair(need: &Pred, pins: &mut Row, base: &Row, g: &Graph) {
+    fn conjuncts<'p>(node: &'p Pred, out: &mut Vec<&'p Atom>) {
+        match node {
+            Pred::Atom(a) if !a.is_array => out.push(a),
+            Pred::And(c) => c.iter().for_each(|p| conjuncts(p, out)),
+            _ => {}
+        }
+    }
+    let mut atoms = Vec::new();
+    conjuncts(need, &mut atoms);
+    let mut by_var: HashMap<&str, Vec<&Atom>> = HashMap::new();
+    for a in atoms {
+        by_var.entry(a.var.as_str()).or_default().push(a);
+    }
+    let mut vars: Vec<&str> = by_var.keys().copied().collect();
+    vars.sort_unstable();
+    for var in vars {
+        let Some(current) = g.default_row.get(var) else {
+            continue;
+        };
+        let atoms = &by_var[var];
+        let ok = |v: &Value| {
+            atoms
+                .iter()
+                .all(|a| holds(a.op, v, &a.values) != Some(false))
+        };
+        if base.contains_key(var) || ok(pins.get(var).unwrap_or(current)) {
+            continue;
+        }
+        let empty = Vec::new();
+        let known = g.value_sets.get(var).unwrap_or(&empty);
+        let literals: Vec<Value> = atoms
+            .iter()
+            .flat_map(|a| a.values.iter().cloned())
+            .collect();
+        let mut pool: Vec<Value> = known.iter().chain(&literals).cloned().collect();
+        for v in &literals {
+            pool.extend([bump(v.clone(), -1), bump(v.clone(), 1)]);
+        }
+        pool.push(outside(&literals, known));
+        if let Some(v) = pool.into_iter().find(|v| ok(v)) {
+            pins.insert(var.to_string(), v);
+        }
+    }
+}
+
+fn cells(g: &Graph, row: &Row) -> Vec<Value> {
+    g.inputs
+        .iter()
+        .map(|h| row.get(h).cloned().unwrap_or(Value::Missing))
+        .collect()
 }
 
 /// Output stem for a source path: the file name minus a `.sas` / `.txt`
@@ -239,9 +604,20 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
     let arrays = collect_array_decls(&tokens);
     let self_declared = collect_self_declared(&tokens);
     let assigned = collect_assigned(&tokens);
-    let mut used = HashSet::new();
-    let mut predicates = Vec::new();
-    walk_predicates(&tokens, 0, &[], &mut predicates, &mut used, &arrays);
+    let mut walker = Walker {
+        tokens: &tokens,
+        arrays: &arrays,
+        used: HashSet::new(),
+        preds: Vec::new(),
+        branches: Vec::new(),
+    };
+    walker.walk(0, &[], &[]);
+    let Walker {
+        used,
+        preds: mut predicates,
+        mut branches,
+        ..
+    } = walker;
 
     let mut base: HashSet<String> = self_declared;
     base.extend(used.difference(&assigned).cloned());
@@ -260,6 +636,7 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
     // baseline-equivalent row, which biases toward "nothing fired".
     let input_set: HashSet<&str> = inputs.iter().map(String::as_str).collect();
     predicates.retain(|p| references_input(p, &input_set, &arrays));
+    branches.retain(|b| references_input(&b.leaf, &input_set, &arrays));
 
     let mut char_inputs: HashSet<String> = HashSet::new();
     for decl in arrays.values().filter(|d| d.char) {
@@ -273,6 +650,7 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
     Graph {
         inputs,
         predicates,
+        branches,
         arrays,
         value_sets,
         default_row,
@@ -465,52 +843,116 @@ fn statement_context(tokens: &[Token], ident_idx: usize) -> bool {
 
 // ── `if`-head predicates ────────────────────────────────────────────────
 
-/// Walk the token stream tracking the chain of enclosing
-/// `if … then do; … end;` guards. Each captured predicate is the AND of
-/// every enclosing if-pred plus the leaf if-pred — so when the sampler
-/// pins a leaf, it also pins the outer guards required to reach it.
-///
-/// Bare `do … end` blocks (loops, compound statements without an `if`
-/// head) descend without pushing onto the context. Returns the index of
-/// the closing `end` (or the stream length).
-fn walk_predicates(
-    tokens: &[Token],
-    mut i: usize,
-    context: &[Pred],
-    preds: &mut Vec<Pred>,
-    used: &mut HashSet<String>,
-    arrays: &HashMap<String, ArrayDecl>,
-) -> usize {
-    while i < tokens.len() {
-        match tokens[i].token_type {
-            TokenType::KwIf => {
-                let j = if_head_end(tokens, i + 1);
-                let pred = PredicateParser::new(&tokens[i + 1..j], arrays, used).parse();
-                capture_predicate(preds, context, &pred);
-                if is(tokens, j, TokenType::KwThen) && is(tokens, j + 1, TokenType::KwDo) {
-                    let mut body = j + 2;
+/// Token-stream walker collecting the sampler's predicates and
+/// [`minimal`]'s branches in one pass.
+struct Walker<'a> {
+    tokens: &'a [Token],
+    arrays: &'a HashMap<String, ArrayDecl>,
+    used: HashSet<String>,
+    preds: Vec<Pred>,
+    branches: Vec<Branch>,
+}
+
+impl Walker<'_> {
+    /// Walk the token stream tracking the chain of enclosing
+    /// `if … then do; … end;` guards. Each captured predicate is the AND
+    /// of every enclosing if-pred plus the leaf if-pred — so when the
+    /// sampler pins a leaf, it also pins the outer guards required to
+    /// reach it.
+    ///
+    /// `reach` additionally tracks `else` arms and subsetting `if`s for
+    /// the branch list; it never feeds the sampler's predicates.
+    ///
+    /// Bare `do … end` blocks (loops, compound statements without an `if`
+    /// head) descend without pushing onto the context. Returns the index
+    /// of the closing `end` (or the stream length).
+    fn walk(&mut self, mut i: usize, context: &[Pred], reach: &[Pred]) -> usize {
+        let tokens = self.tokens;
+        let mut reach = reach.to_vec();
+        // Index of the `else` that would pair with the last `if` walked,
+        // and the reach of that else arm.
+        let mut else_at: Option<(usize, Vec<Pred>)> = None;
+        // Reach for the statement after a pairing `else`.
+        let mut arm: Option<Vec<Pred>> = None;
+        while i < tokens.len() {
+            match tokens[i].token_type {
+                TokenType::KwIf => {
+                    let in_else = arm.is_some();
+                    let here = arm.take().unwrap_or_else(|| reach.clone());
+                    let j = if_head_end(tokens, i + 1);
+                    let pred = PredicateParser::new(&tokens[i + 1..j], self.arrays, &mut self.used)
+                        .parse();
+                    capture_predicate(&mut self.preds, context, &pred);
+                    self.branches.push(Branch {
+                        line: tokens[i].start_line,
+                        reach: here.clone(),
+                        leaf: pred.clone(),
+                    });
+                    let mut not_taken = here.clone();
+                    not_taken.push(Pred::Not(Box::new(pred.clone())));
+                    if is(tokens, j, TokenType::SEMI) {
+                        // Subsetting `if X;` — rows failing X stop here.
+                        if !in_else {
+                            reach.push(pred);
+                        }
+                        i = j + 1;
+                    } else if is(tokens, j, TokenType::KwThen) && is(tokens, j + 1, TokenType::KwDo)
+                    {
+                        let mut body = j + 2;
+                        if is(tokens, body, TokenType::SEMI) {
+                            body += 1;
+                        }
+                        let mut inner = context.to_vec();
+                        inner.push(pred.clone());
+                        let mut inner_reach = here;
+                        inner_reach.push(pred);
+                        let end = self.walk(body, &inner, &inner_reach);
+                        let after = end + 1 + usize::from(is(tokens, end + 1, TokenType::SEMI));
+                        else_at = Some((after, not_taken));
+                        i = end + 1;
+                    } else {
+                        else_at = Some((statement_end(tokens, j + 1) + 1, not_taken));
+                        i = j + 1;
+                    }
+                }
+                TokenType::KwElse => {
+                    arm = else_at.take().filter(|(at, _)| *at == i).map(|(_, r)| r);
+                    i += 1;
+                }
+                TokenType::KwDo => {
+                    let body_reach = arm.take().unwrap_or_else(|| reach.clone());
+                    let mut body = i + 1;
                     if is(tokens, body, TokenType::SEMI) {
                         body += 1;
                     }
-                    let mut inner = context.to_vec();
-                    inner.push(pred);
-                    i = walk_predicates(tokens, body, &inner, preds, used, arrays) + 1;
-                } else {
-                    i = j + 1;
+                    i = self.walk(body, context, &body_reach) + 1;
                 }
-            }
-            TokenType::KwDo => {
-                let mut body = i + 1;
-                if is(tokens, body, TokenType::SEMI) {
-                    body += 1;
+                TokenType::SEMI => {
+                    arm = None;
+                    i += 1;
                 }
-                i = walk_predicates(tokens, body, context, preds, used, arrays) + 1;
+                TokenType::KwEnd => return i,
+                _ => i += 1,
             }
-            TokenType::KwEnd => return i,
-            _ => i += 1,
         }
+        i
     }
-    i
+}
+
+/// Index of the depth-0 `;` ending the statement that starts at `start`.
+fn statement_end(tokens: &[Token], start: usize) -> usize {
+    let mut depth = 0i32;
+    let mut j = start;
+    while j < tokens.len() {
+        match tokens[j].token_type {
+            TokenType::LPAREN => depth += 1,
+            TokenType::RPAREN => depth -= 1,
+            TokenType::SEMI if depth == 0 => return j,
+            _ => {}
+        }
+        j += 1;
+    }
+    j
 }
 
 fn capture_predicate(preds: &mut Vec<Pred>, context: &[Pred], leaf: &Pred) {
@@ -1114,8 +1556,8 @@ fn build_default_row(
 
 type Row = HashMap<String, Value>;
 
-fn sample_row(g: &Graph, rng: &mut Rng) -> Row {
-    let mut strategy = pick_strategy(rng);
+fn sample_row(g: &Graph, mix: &Mix, rng: &mut Rng) -> Row {
+    let mut strategy = pick_strategy(&mix.weights, rng);
     if matches!(strategy, Strategy::Single | Strategy::Combo) && g.predicates.is_empty() {
         strategy = Strategy::Baseline;
     }
@@ -1126,14 +1568,15 @@ fn sample_row(g: &Graph, rng: &mut Rng) -> Row {
             pinned_row(g, rng, &[pred])
         }
         Strategy::Combo => {
-            let k = rng.range_usize(*COMBO_SIZES.start(), *COMBO_SIZES.end());
+            let sizes = &mix.combo_sizes.0;
+            let k = rng.range_usize(*sizes.start(), *sizes.end());
             let picks = rng.sample_k(&g.predicates, k);
             pinned_row(g, rng, &picks)
         }
         Strategy::Perturbation => {
             let mut row = g.default_row.clone();
             for var in &g.inputs {
-                if rng.next_f64() < PERTURBATION_PROB {
+                if rng.next_f64() < mix.perturbation_prob {
                     row.insert(var.clone(), sample_value_for(var, g, rng));
                 }
             }
@@ -1147,16 +1590,23 @@ fn sample_row(g: &Graph, rng: &mut Rng) -> Row {
     }
 }
 
-fn pick_strategy(rng: &mut Rng) -> Strategy {
-    let r = rng.next_f64();
+fn pick_strategy(weights: &Weights, rng: &mut Rng) -> Strategy {
+    let total: f64 = weights.0.iter().map(|(_, w)| w).sum();
+    let r = rng.next_f64() * total;
     let mut acc = 0.0;
-    for (strategy, w) in STRATEGY_WEIGHTS {
+    for &(strategy, w) in &weights.0 {
         acc += w;
         if r < acc {
             return strategy;
         }
     }
-    STRATEGY_WEIGHTS[STRATEGY_WEIGHTS.len() - 1].0
+    // Float round-off on `r ≈ total`: fall back to the last weighted one.
+    weights
+        .0
+        .iter()
+        .rev()
+        .find(|(_, w)| *w > 0.0)
+        .map_or(Strategy::Baseline, |p| p.0)
 }
 
 /// Satisfy each predicate in turn over the default row. Pins are
@@ -1168,10 +1618,15 @@ fn pinned_row(g: &Graph, rng: &mut Rng, preds: &[&Pred]) -> Row {
     for p in preds {
         satisfy(p, &mut pinned, g, rng);
     }
+    materialize(g, &pinned)
+}
+
+/// The default row with `pins` laid over it (non-input pins are dropped).
+fn materialize(g: &Graph, pins: &Row) -> Row {
     let mut row = g.default_row.clone();
-    for (k, v) in pinned {
-        if let Some(cell) = row.get_mut(&k) {
-            *cell = v;
+    for (k, v) in pins {
+        if let Some(cell) = row.get_mut(k) {
+            *cell = v.clone();
         }
     }
     row
@@ -1233,13 +1688,35 @@ fn pick_satisfying_value(atom: &Atom, target: &str, g: &Graph, rng: &mut Rng) ->
             let choices: Vec<&Value> = vs.iter().filter(|v| !atom.values.contains(v)).collect();
             match rng.choose(&choices) {
                 Some(v) => (*v).clone(),
-                None => g.default_row.get(target).cloned().unwrap_or(Value::Missing),
+                None => outside(&atom.values, vs),
             }
         }
         Op::Gt => bump(first, 1),
         Op::Lt => bump(first, -1),
         Op::Ge | Op::Le => first,
     }
+}
+
+/// A value outside `excluded`, for `ne` / `not in` atoms whose value set
+/// holds nothing else: one past the largest known number, or a string
+/// none of the literals spell.
+fn outside(excluded: &[Value], known: &[Value]) -> Value {
+    if excluded.iter().any(|v| matches!(v, Value::Str(_))) {
+        let mut s = String::from("Z");
+        while excluded
+            .iter()
+            .any(|v| sas_cmp(v, &Value::Str(s.clone())) == Some(Ordering::Equal))
+        {
+            s.push('Z');
+        }
+        return Value::Str(s);
+    }
+    let max = excluded
+        .iter()
+        .chain(known)
+        .filter_map(Value::as_f64)
+        .fold(0.0, f64::max);
+    Value::Int(max.floor() as i64 + 1)
 }
 
 fn bump(v: Value, delta: i64) -> Value {
@@ -1300,6 +1777,190 @@ fn max_value_for(var: &str, g: &Graph) -> Option<i64> {
             Some(acc.map_or(x, |a| a.max(x)))
         })
         .map(|x| x.floor() as i64)
+}
+
+// ── Branch evaluation ───────────────────────────────────────────────────
+
+/// What a row must satisfy to send `b` down `outcome`: the leaf (or its
+/// negation) plus every reach condition, with `Not` pushed down to the
+/// atoms so [`satisfy`] can pin it. The leaf comes first: pins are
+/// first-writer-wins, and the leaf is usually the tighter bound on a
+/// shared variable (`else if age lt 18` under `not (age ge 65)`).
+fn requirement(b: &Branch, outcome: bool) -> Pred {
+    let leaf = if outcome {
+        positive(&b.leaf)
+    } else {
+        negate(&b.leaf)
+    };
+    Pred::And(
+        [leaf]
+            .into_iter()
+            .chain(b.reach.iter().map(positive))
+            .collect(),
+    )
+}
+
+/// `node` with every `Not` eliminated.
+fn positive(node: &Pred) -> Pred {
+    match node {
+        Pred::And(c) => Pred::And(c.iter().map(positive).collect()),
+        Pred::Or(c) => Pred::Or(c.iter().map(positive).collect()),
+        Pred::Not(p) => negate(p),
+        other => other.clone(),
+    }
+}
+
+/// The negation of `node`, in `Not`-free form. Unparsed conditions stay
+/// [`Pred::Tautology`] and drop out of disjunctions so `satisfy` never
+/// spends its OR pick on them.
+fn negate(node: &Pred) -> Pred {
+    match node {
+        Pred::Atom(a) => Pred::Atom(Atom {
+            op: match a.op {
+                Op::In | Op::Eq => Op::Ne,
+                Op::Ne => Op::In,
+                Op::Lt => Op::Ge,
+                Op::Le => Op::Gt,
+                Op::Gt => Op::Le,
+                Op::Ge => Op::Lt,
+            },
+            ..a.clone()
+        }),
+        Pred::Sum(s) => {
+            let with = |op| Pred::Sum(SumAtom { op, ..s.clone() });
+            match s.op {
+                Op::In | Op::Eq => Pred::Or(vec![with(Op::Lt), with(Op::Gt)]),
+                Op::Ne => with(Op::Eq),
+                Op::Lt => with(Op::Ge),
+                Op::Le => with(Op::Gt),
+                Op::Gt => with(Op::Le),
+                Op::Ge => with(Op::Lt),
+            }
+        }
+        Pred::And(c) => {
+            let mut alts: Vec<Pred> = c
+                .iter()
+                .map(negate)
+                .filter(|p| !matches!(p, Pred::Tautology))
+                .collect();
+            match alts.len() {
+                0 => Pred::Tautology,
+                1 => alts.pop().unwrap(),
+                _ => Pred::Or(alts),
+            }
+        }
+        Pred::Or(c) => Pred::And(c.iter().map(negate).collect()),
+        Pred::Not(p) => positive(p),
+        Pred::Tautology => Pred::Tautology,
+    }
+}
+
+/// True iff `row` arrives at `b` and takes `outcome`. Conditions over
+/// arrays are checked per member index (one loop iteration each), and
+/// any iteration counts. Unknowns are assumed to hold.
+fn reaches(b: &Branch, outcome: bool, row: &Row, g: &Graph) -> bool {
+    let mut slots = 0;
+    walk_atoms(&b.reach, &mut |p| slots = slots.max(array_len(p, g)));
+    walk_atom(&b.leaf, &mut |p| slots = slots.max(array_len(p, g)));
+    let at = |slot: Option<usize>| {
+        b.reach.iter().all(|p| eval(p, row, g, slot) != Some(false))
+            && eval(&b.leaf, row, g, slot).unwrap_or(true) == outcome
+    };
+    if slots == 0 {
+        at(None)
+    } else {
+        (0..slots).any(|k| at(Some(k)))
+    }
+}
+
+fn array_len(node: &Pred, g: &Graph) -> usize {
+    match node {
+        Pred::Atom(a) if a.is_array => g.arrays.get(&a.var).map_or(0, |d| d.members.len()),
+        _ => 0,
+    }
+}
+
+/// Kleene three-valued evaluation of `node` against a full row. `None`
+/// means unknown: an unparsed condition, a derived (non-input) variable,
+/// or a comparison against non-literals. `slot` binds array atoms to one
+/// member; `None` means "any member".
+fn eval(node: &Pred, row: &Row, g: &Graph, slot: Option<usize>) -> Option<bool> {
+    match node {
+        Pred::Atom(a) => match g.arrays.get(&a.var).filter(|_| a.is_array) {
+            Some(decl) => match slot {
+                Some(k) => holds(a.op, row.get(decl.members.get(k)?)?, &a.values),
+                None => kleene_or(
+                    decl.members
+                        .iter()
+                        .map(|m| row.get(m).and_then(|v| holds(a.op, v, &a.values))),
+                ),
+            },
+            None => holds(a.op, row.get(&a.var)?, &a.values),
+        },
+        Pred::Sum(s) => {
+            // SAS `sum()` skips missing arguments.
+            let mut total = 0.0;
+            for v in &s.vars {
+                match row.get(v)? {
+                    Value::Missing => {}
+                    x => total += x.as_f64()?,
+                }
+            }
+            holds(s.op, &Value::Float(total), std::slice::from_ref(&s.value))
+        }
+        Pred::And(c) => kleene_and(c.iter().map(|p| eval(p, row, g, slot))),
+        Pred::Or(c) => kleene_or(c.iter().map(|p| eval(p, row, g, slot))),
+        Pred::Not(p) => eval(p, row, g, slot).map(|b| !b),
+        Pred::Tautology => None,
+    }
+}
+
+fn kleene_and(vals: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut unknown = false;
+    for v in vals {
+        match v {
+            Some(false) => return Some(false),
+            None => unknown = true,
+            Some(true) => {}
+        }
+    }
+    (!unknown).then_some(true)
+}
+
+fn kleene_or(vals: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    kleene_and(vals.map(|v| v.map(|b| !b))).map(|b| !b)
+}
+
+fn holds(op: Op, v: &Value, values: &[Value]) -> Option<bool> {
+    let first = values.first()?;
+    let eq = || {
+        values
+            .iter()
+            .any(|x| sas_cmp(v, x) == Some(Ordering::Equal))
+    };
+    let ord = sas_cmp(v, first);
+    Some(match op {
+        Op::In | Op::Eq => eq(),
+        Op::Ne => !eq(),
+        Op::Lt => ord == Some(Ordering::Less),
+        Op::Le => matches!(ord, Some(Ordering::Less | Ordering::Equal)),
+        Op::Gt => ord == Some(Ordering::Greater),
+        Op::Ge => matches!(ord, Some(Ordering::Greater | Ordering::Equal)),
+    })
+}
+
+/// SAS comparison: numeric missing sorts below every number, character
+/// values compare with trailing blanks ignored (and missing as blank).
+fn sas_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Missing, Value::Missing) => Some(Ordering::Equal),
+        (Value::Str(x), Value::Str(y)) => Some(x.trim_end().cmp(y.trim_end())),
+        (Value::Str(x), Value::Missing) => Some(x.trim_end().cmp("")),
+        (Value::Missing, Value::Str(y)) => Some("".cmp(y.trim_end())),
+        (Value::Missing, _) => b.is_numeric().then_some(Ordering::Less),
+        (_, Value::Missing) => a.is_numeric().then_some(Ordering::Greater),
+        _ => a.as_f64()?.partial_cmp(&b.as_f64()?),
+    }
 }
 
 // ── RNG ─────────────────────────────────────────────────────────────────
@@ -1439,6 +2100,128 @@ mod tests {
             let total: i64 = ["d1", "d2", "d3"].iter().map(|v| row[*v].to_i64()).sum();
             assert_eq!(total, 4);
         }
+    }
+
+    #[test]
+    fn weights_parse_relative_and_reject_bad_specs() {
+        let w: Weights = "single=3, combo=1".parse().unwrap();
+        assert_eq!(
+            w.to_string(),
+            "baseline=0,single=3,combo=1,perturbation=0,chaos=0"
+        );
+        assert_eq!(
+            Weights::default().to_string().parse::<Weights>(),
+            Ok(Weights::default())
+        );
+        assert!("bogus=1"
+            .parse::<Weights>()
+            .unwrap_err()
+            .contains("unknown strategy"));
+        assert!("single=1,single=2".parse::<Weights>().is_err());
+        assert!("single=-1".parse::<Weights>().is_err());
+        assert!("chaos=0".parse::<Weights>().is_err());
+        assert!("single".parse::<Weights>().is_err());
+    }
+
+    #[test]
+    fn combo_sizes_parse_ranges_and_singletons() {
+        assert_eq!("3-5".parse(), Ok(ComboSizes(3..=5)));
+        assert_eq!("4".parse(), Ok(ComboSizes(4..=4)));
+        assert!("5-3".parse::<ComboSizes>().is_err());
+        assert!("0-2".parse::<ComboSizes>().is_err());
+    }
+
+    #[test]
+    fn mix_weights_select_strategies() {
+        let src = "if a = 1 then c = 1;\nif b in (2, 3) then d = 1;\n";
+        let specs = ValueSpecs::default();
+        let baseline = Mix {
+            weights: "baseline=1".parse().unwrap(),
+            ..Mix::default()
+        };
+        let out = sample_with(src, &specs, 20, 1, &baseline);
+        assert!(out.rows.iter().all(|r| r == &out.rows[0]));
+        let single = Mix {
+            weights: "single=1".parse().unwrap(),
+            ..Mix::default()
+        };
+        let out = sample_with(src, &specs, 20, 1, &single);
+        assert!(out
+            .rows
+            .iter()
+            .all(|r| r[0] == Value::Int(1) || r[1] != Value::Int(0)));
+    }
+
+    fn minimal_rows(src: &str) -> (Vec<Vec<String>>, Coverage) {
+        let (out, cov) = minimal(src, &ValueSpecs::default(), 42);
+        let rows = out
+            .rows
+            .iter()
+            .map(|r| r.iter().map(Value::to_string).collect())
+            .collect();
+        (rows, cov)
+    }
+
+    #[test]
+    fn minimal_covers_else_if_chains_in_source_order() {
+        let (rows, cov) = minimal_rows(
+            "if age ge 65 then do;\n\
+               if sex = 'F' then g = 1;\n\
+               else if sex = 'M' then g = 2;\n\
+             end;\n\
+             else if age lt 18 then g = 4;\n",
+        );
+        assert_eq!((cov.covered(), cov.total), (8, 8));
+        // Three paths under `age ge 65` (F, M, neither), two beside it.
+        assert_eq!(
+            rows,
+            vec![
+                vec!["65", "F"],
+                vec!["65", "M"],
+                vec!["65", ""],
+                vec!["17", ""],
+                vec!["64", ""],
+            ]
+        );
+    }
+
+    #[test]
+    fn minimal_finds_values_outside_every_excluded_list() {
+        let (rows, cov) = minimal_rows("if a in (0) then x = 1;\nelse if a in (1) then x = 2;\n");
+        assert!(cov.uncovered.is_empty());
+        assert!(rows.contains(&vec!["2".to_string()]));
+    }
+
+    #[test]
+    fn minimal_reports_infeasible_outcomes_and_honours_subsetting_if() {
+        let (rows, cov) = minimal_rows(
+            "if x = 1 then do;\n\
+               if x = 2 then y = 1;\n\
+             end;\n\
+             if z gt 5;\n\
+             if w = 3 then v = 1;\n",
+        );
+        assert_eq!(cov.uncovered, vec![(2, true)]);
+        // Both `w` outcomes need `z gt 5` to get past the subsetting if.
+        let w_rows: Vec<_> = rows.iter().filter(|r| r[0] == "3").collect();
+        assert!(!w_rows.is_empty() && w_rows.iter().all(|r| r[2] == "6"));
+    }
+
+    #[test]
+    fn minimal_covers_array_loops_and_sums() {
+        let (rows, cov) = minimal_rows(
+            "array dx[2] $ dx1-dx2;\n\
+             do i = 1 to 2; if dx[i] in ('A1') then h = 1; end;\n\
+             if sum(c1, c2) ge 3 then e = 1;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        assert!(rows.len() <= 2);
+    }
+
+    #[test]
+    fn minimal_without_branches_emits_one_baseline_row() {
+        let (rows, cov) = minimal_rows("x = x;\n");
+        assert_eq!((rows, cov.total), (vec![vec!["0".to_string()]], 0));
     }
 
     #[test]

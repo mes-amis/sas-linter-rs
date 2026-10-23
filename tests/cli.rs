@@ -169,3 +169,52 @@ fn synthesize_rejects_csv_target_with_multiple_sources() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn synthesize_minimal_reports_branch_coverage() {
+    let tmp = synth_tmp("minimal");
+    let src = tmp.join("algo.sas");
+    std::fs::write(
+        &src,
+        "if a = 1 then do;\n  if a = 2 then b = 1;\nend;\nelse if c in (3, 4) then d = 1;\n",
+    )
+    .unwrap();
+    let target = tmp.join("min.csv");
+    let out = Command::new(bin())
+        .args(["synthesize", "--minimal", "-o"])
+        .arg(&target)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("(covers 5/6 branch outcomes)"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("algo.sas:2: no row reaches the true branch")
+    );
+    let csv = std::fs::read_to_string(target).unwrap();
+    assert_eq!(csv.lines().next(), Some("a,c"));
+    assert_eq!(csv.lines().count(), 1 + 3);
+}
+
+#[test]
+fn synthesize_rejects_bad_mix_options() {
+    let tmp = synth_tmp("mix");
+    let src = tmp.join("a.sas");
+    std::fs::write(&src, "if x = 1 then y = 1;\n").unwrap();
+    for bad in [
+        &["--weights", "single=1,nope=2"][..],
+        &["--perturbation-prob", "2"],
+        &["--combo-size", "3-1"],
+        &["--minimal", "--size", "10"],
+    ] {
+        let out = Command::new(bin())
+            .arg("synthesize")
+            .args(bad)
+            .arg("-o")
+            .arg(tmp.join("out.csv"))
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{bad:?}");
+    }
+}

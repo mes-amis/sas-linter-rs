@@ -8,12 +8,12 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.4.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.5.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
 **macOS (Apple Silicon)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.4.0/sas-lint-v0.4.0-aarch64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-aarch64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -21,7 +21,7 @@ sas-lint --version
 **macOS (Intel)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.4.0/sas-lint-v0.4.0-x86_64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-x86_64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -29,7 +29,7 @@ sas-lint --version
 **Linux (x86_64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.4.0/sas-lint-v0.4.0-x86_64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-x86_64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -37,7 +37,7 @@ sas-lint --version
 **Linux (arm64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.4.0/sas-lint-v0.4.0-aarch64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-aarch64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -47,7 +47,7 @@ sas-lint --version
 ```powershell
 $dir = "$env:LOCALAPPDATA\sas-lint"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.4.0/sas-lint-v0.4.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.0/sas-lint-v0.5.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
 & "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
@@ -72,19 +72,19 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
-The current extension release is **vscode-v0.3.8** (also kept in step by `tests/release_versions.rs`).
+The current extension release is **vscode-v0.3.9** (also kept in step by `tests/release_versions.rs`).
 
 **macOS / Linux**
 
 ```sh
-curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.8/sas-linter-vscode-0.3.8.vsix
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.9/sas-linter-vscode-0.3.9.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.8/sas-linter-vscode-0.3.8.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.9/sas-linter-vscode-0.3.9.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
 code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 
@@ -141,6 +141,12 @@ sas-lint --format legacy/*.sas
 # Synthesize input testdata: one <stem>.csv per source in the output dir
 sas-lint synthesize sources/* -o testdata/inputs
 sas-lint synthesize --size 1000 --seed 7 algo.sas -o algo_inputs.csv
+
+# Reshape the strategy mix: only single- and combo-predicate rows, 3:1
+sas-lint synthesize --weights single=3,combo=1 --combo-size 2-4 algo.sas -o algo.csv
+
+# Fewest rows that drive every `if` both ways (100% branch coverage)
+sas-lint synthesize --minimal algo.sas -o algo_min.csv
 ```
 
 Exit codes: `0` clean, `1` findings, `2` invalid args.
@@ -153,11 +159,37 @@ guards) to find the input variables, builds a value set per input, and
 writes `--size` sampled rows (default 500) as CSV. Inputs whose values are
 all string literals (or `$` arrays) default to `""`; everything else to `0`.
 
-Rows come from a weighted mix of strategies: baseline (everything at
-default, 15%), single (satisfy one predicate, 45%), combo (satisfy 2–6
-predicates at once, 25%), perturbation (baseline plus a few random cell
-flips, 10%) and chaos (uniform sampling, 5%). Output is deterministic for a
-given `--seed` (default 42).
+Rows come from a weighted mix of strategies:
+
+| Strategy       | Default weight | Row                                                        |
+| -------------- | -------------- | ---------------------------------------------------------- |
+| `baseline`     | 0.15           | every input at its default                                 |
+| `single`       | 0.45           | satisfy one predicate                                      |
+| `combo`        | 0.25           | satisfy `--combo-size` predicates at once (default `2-6`)  |
+| `perturbation` | 0.10           | baseline, each cell redrawn at `--perturbation-prob` (0.05) |
+| `chaos`        | 0.05           | every cell sampled uniformly from its value set            |
+
+`--weights` replaces the mix, as `name=weight,…`. The weights are relative,
+so they don't need to sum to 1, and any strategy you leave out gets 0.
+`--weights perturbation=1 --perturbation-prob 0.2` produces only
+perturbation rows, each with about a fifth of its cells flipped.
+`--combo-size` takes `MIN-MAX`, or a bare `N` for exactly N predicates.
+Output is deterministic for a given `--seed` (default 42).
+
+`--minimal` skips the weighted mix. It writes the smallest row set it can
+find that sends every `if` down both its true and its false branch,
+covering 100% of the branches in the modelled graph. Rows are sorted by
+the first branch each one reaches in source order. Reachability follows
+`then do` nesting, `else` / `else if` chains, and subsetting `if X;`
+statements. A condition inside an array `do` loop counts as covered when
+any iteration takes the branch. The set comes from a greedy set cover and
+is often, though not provably, the true minimum. Conditions the parser
+can't model (function calls, derived variables) are assumed to hold.
+Stdout reports `covers N/M branch outcomes`, and stderr names each
+`file:line` outcome that no row reaches, either because the branch is
+unreachable or because it's beyond what the sampler can pin. `--minimal`
+can't be combined with `--size`, `--weights`, `--perturbation-prob` or
+`--combo-size`.
 
 Value sets are also seeded from the acceptable-values catalog configured
 for `variable_value_out_of_known_range` in `--config` (`csv_paths`,
