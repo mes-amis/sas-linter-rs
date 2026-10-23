@@ -27,6 +27,9 @@ pub enum NameMatch {
 pub enum SpecKind {
     Range(i64, i64),
     Set(Vec<i64>),
+    /// `lo-hi` with a decimal point on either end (`0.0-99.9`): any real
+    /// value in the closed interval.
+    Decimal(f64, f64),
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +225,8 @@ fn split_numeric_suffix(s: &str) -> Option<(&str, u64)> {
 }
 
 static RE_RANGE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(-?\d+)-(-?\d+)$").unwrap());
+static RE_DECIMAL_RANGE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)$").unwrap());
 static RE_SET: Lazy<Regex> = Lazy::new(|| Regex::new(r"^-?\d+(?:\s*,\s*-?\d+)+$").unwrap());
 static RE_RANGE_PAREN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(\d+)-(\d+)\s+\(([^)]+)\)$").unwrap());
@@ -233,6 +238,16 @@ pub fn parse_values(text: &str) -> Option<Spec> {
         let hi: i64 = c[2].parse().ok()?;
         return Some(Spec {
             kind: SpecKind::Range(lo, hi),
+        });
+    }
+    if let Some(c) = RE_DECIMAL_RANGE
+        .captures(text)
+        .filter(|_| text.contains('.'))
+    {
+        let lo: f64 = c[1].parse().ok()?;
+        let hi: f64 = c[2].parse().ok()?;
+        return Some(Spec {
+            kind: SpecKind::Decimal(lo, hi),
         });
     }
     if RE_SET.is_match(text) {
@@ -279,6 +294,18 @@ pub fn parse_values(text: &str) -> Option<Spec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_decimal_ranges() {
+        assert!(matches!(
+            parse_values("0.5-40.0").map(|s| s.kind),
+            Some(SpecKind::Decimal(lo, hi)) if lo == 0.5 && hi == 40.0
+        ));
+        assert!(matches!(
+            parse_values("0-2").map(|s| s.kind),
+            Some(SpecKind::Range(0, 2))
+        ));
+    }
 
     #[test]
     fn expands_numeric_suffix_ranges() {

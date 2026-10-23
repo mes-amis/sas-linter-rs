@@ -63,6 +63,9 @@ pub const DEFAULT_PERTURBATION_PROB: f64 = 0.05;
 /// because mutually exclusive guards conflict and first-writer-wins
 /// biases rows into the dominant branch.
 const COMBO_SIZES: RangeInclusive<usize> = 2..=6;
+/// Equal slices a documented decimal range is cut into when seeding value
+/// sets; the slice bounds (min and max included) are the values used.
+const DECIMAL_SLICES: usize = 5;
 /// Random re-tries per placement when [`minimal`] packs a branch outcome
 /// into a row (OR disjuncts, array members, and value picks are random).
 const MINIMAL_ATTEMPTS: usize = 16;
@@ -396,6 +399,8 @@ pub fn sample_with(
 #[derive(Debug, Default)]
 pub struct Coverage {
     pub total: usize,
+    /// Catalog boundary values ([`boundary_values`]) placed in some row.
+    pub boundaries: usize,
     /// `(source line, outcome)` of each outcome no row reaches — the
     /// branch is infeasible, or its condition is outside what the sampler
     /// can pin.
@@ -408,53 +413,86 @@ impl Coverage {
     }
 }
 
-/// The smallest row set found that drives every modelled `if` both ways,
-/// ordered by the first branch outcome each row reaches in source order.
+/// Something a [`minimal`] row set must contain.
+enum Target {
+    /// Branch `.0` of [`Graph::branches`] taking outcome `.1`.
+    Branch(usize, bool),
+    /// Input `.0` holding catalog boundary value `.1`.
+    Boundary(String, Value),
+}
+
+/// The smallest row set found that drives every modelled `if` both ways
+/// and puts each documented input at its catalog boundaries (see
+/// [`boundary_values`]), ordered by the first branch outcome each row
+/// reaches in source order.
 ///
-/// Greedy set cover: outcomes are visited in source order, and each one
-/// not already reached is packed into the earliest row whose pins it
-/// doesn't disturb, else into a fresh row; rows left redundant at the end
-/// are dropped. Unparsed conditions are assumed to hold. Deterministic
-/// for a given seed.
+/// Greedy set cover: branch outcomes are visited in source order, then
+/// boundary values, and each one not already reached is packed into the
+/// earliest row whose pins it doesn't disturb, else into a fresh row; rows
+/// left redundant at the end are dropped. Unparsed conditions are assumed
+/// to hold. Deterministic for a given seed.
 pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Coverage) {
     struct Candidate {
         pins: Row,
         row: Row,
-        /// Outcomes this row is responsible for; later merges must keep them.
+        /// Targets this row is responsible for; later merges must keep them.
         keep: Vec<usize>,
     }
 
     let g = build_graph(source, specs);
     let mut rng = Rng::new(seed);
-    let targets: Vec<(usize, bool)> = (0..g.branches.len())
-        .flat_map(|b| [(b, true), (b, false)])
+    let mut targets: Vec<Target> = (0..g.branches.len())
+        .flat_map(|b| [Target::Branch(b, true), Target::Branch(b, false)])
         .collect();
-    let hit = |row: &Row, t: usize| {
-        let (b, outcome) = targets[t];
-        reaches(&g.branches[b], outcome, row, &g)
+    for var in &g.inputs {
+        if let Some(spec) = specs.lookup(var) {
+            for v in boundary_values(&spec.kind) {
+                targets.push(Target::Boundary(var.clone(), v));
+            }
+        }
+    }
+    let hit = |row: &Row, t: usize| match &targets[t] {
+        Target::Branch(b, outcome) => reaches(&g.branches[*b], *outcome, row, &g),
+        Target::Boundary(var, v) => {
+            row.get(var).and_then(|cell| sas_cmp(cell, v)) == Some(Ordering::Equal)
+        }
     };
 
-    let mut cands: Vec<Candidate> = Vec::new();
-    for (t, &(b, outcome)) in targets.iter().enumerate() {
-        if let Some(c) = cands.iter_mut().find(|c| hit(&c.row, t)) {
-            c.keep.push(t);
-            continue;
-        }
-        let need = requirement(&g.branches[b], outcome);
-        // Odd attempts pin outer conditions first, for when they're the
-        // tighter bound.
-        let mut reversed = need.clone();
-        if let Pred::And(c) = &mut reversed {
-            c.reverse();
-        }
-        'place: for ci in 0..=cands.len() {
-            for attempt in 0..MINIMAL_ATTEMPTS {
+    // Pin target `t` into the earliest row that still reaches its own
+    // targets, else a fresh row; it then becomes that row's to keep.
+    let place = |t: usize, cands: &mut Vec<Candidate>, rng: &mut Rng| {
+        let (need, reversed) = match &targets[t] {
+            Target::Branch(b, outcome) => {
+                let need = requirement(&g.branches[*b], *outcome);
+                // Odd attempts pin outer conditions first, for when they're
+                // the tighter bound.
+                let mut reversed = need.clone();
+                if let Pred::And(c) = &mut reversed {
+                    c.reverse();
+                }
+                (Some(need), reversed)
+            }
+            Target::Boundary(..) => (None, Pred::Tautology),
+        };
+        let attempts = if need.is_some() { MINIMAL_ATTEMPTS } else { 1 };
+        for ci in 0..=cands.len() {
+            for attempt in 0..attempts {
                 let base = cands.get(ci).map(|c| c.pins.clone()).unwrap_or_default();
                 let mut pins = base.clone();
-                let need =
-                    pick_disjuncts(if attempt % 2 == 0 { &need } else { &reversed }, &mut rng);
-                satisfy(&need, &mut pins, &g, &mut rng);
-                repair(&need, &mut pins, &base, &g);
+                match (&targets[t], &need) {
+                    (Target::Boundary(var, v), _) => {
+                        // Boundaries may overwrite any cell the row's own
+                        // targets don't depend on.
+                        pins.insert(var.clone(), v.clone());
+                    }
+                    (_, Some(need)) => {
+                        let need =
+                            pick_disjuncts(if attempt % 2 == 0 { need } else { &reversed }, rng);
+                        satisfy(&need, &mut pins, &g, rng);
+                        repair(&need, &mut pins, &base, &g);
+                    }
+                    _ => unreachable!(),
+                }
                 let row = materialize(&g, &pins);
                 let keep = cands.get(ci).map_or(&[][..], |c| &c.keep[..]);
                 if !hit(&row, t) || !keep.iter().all(|&k| hit(&row, k)) {
@@ -472,9 +510,36 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
                         keep: vec![t],
                     }),
                 }
-                break 'place;
+                return;
             }
         }
+    };
+
+    let mut cands: Vec<Candidate> = Vec::new();
+    for (t, target) in targets.iter().enumerate() {
+        if let Some(c) = cands.iter_mut().find(|c| hit(&c.row, t)) {
+            // A boundary a row hits by accident stays free, so a later
+            // boundary can still take that cell; the pass below restores
+            // any that get overwritten.
+            if matches!(target, Target::Branch(..)) {
+                c.keep.push(t);
+            }
+            continue;
+        }
+        place(t, &mut cands, &mut rng);
+    }
+    let boundaries: Vec<usize> = (0..targets.len())
+        .filter(|&t| matches!(targets[t], Target::Boundary(..)))
+        .collect();
+    let mut lost = Vec::new();
+    for &t in &boundaries {
+        match cands.iter_mut().find(|c| hit(&c.row, t)) {
+            Some(c) => c.keep.push(t),
+            None => lost.push(t),
+        }
+    }
+    for t in lost {
+        place(t, &mut cands, &mut rng);
     }
 
     // Drop rows whose every outcome another surviving row also reaches.
@@ -495,10 +560,21 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     // Source order of the outcomes each row reaches, earliest first.
     order.sort_by(|&a, &b| reached[a].cmp(&reached[b]));
 
-    let uncovered = (0..targets.len())
-        .filter(|t| !order.iter().any(|&i| reached[i].contains(t)))
-        .map(|t| (g.branches[targets[t].0].line, targets[t].1))
-        .collect();
+    let placed = |t: &usize| order.iter().any(|&i| reached[i].contains(t));
+    let mut total = 0;
+    let mut boundaries = 0;
+    let mut uncovered = Vec::new();
+    for (t, target) in targets.iter().enumerate() {
+        match target {
+            Target::Branch(b, outcome) => {
+                total += 1;
+                if !placed(&t) {
+                    uncovered.push((g.branches[*b].line, *outcome));
+                }
+            }
+            Target::Boundary(..) => boundaries += usize::from(placed(&t)),
+        }
+    }
     let mut rows: Vec<Vec<Value>> = order.iter().map(|&i| cells(&g, &cands[i].row)).collect();
     if rows.is_empty() {
         rows.push(cells(&g, &g.default_row));
@@ -509,7 +585,8 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
             rows,
         },
         Coverage {
-            total: targets.len(),
+            total,
+            boundaries,
             uncovered,
         },
     )
@@ -604,9 +681,11 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
     let arrays = collect_array_decls(&tokens);
     let self_declared = collect_self_declared(&tokens);
     let assigned = collect_assigned(&tokens);
+    let aliases = collect_aliases(&tokens);
     let mut walker = Walker {
         tokens: &tokens,
         arrays: &arrays,
+        aliases: &aliases,
         used: HashSet::new(),
         preds: Vec::new(),
         branches: Vec::new(),
@@ -822,6 +901,45 @@ fn collect_assigned(tokens: &[Token]) -> HashSet<String> {
     out
 }
 
+/// Plain copies `X = Y;` that are `X`'s only assignment and sit outside
+/// any `if` / `do` block, mapped `X → Y`. Self-report recode sections
+/// (`smoke = raw_smoke;`) route every input through one, so predicates on `X`
+/// are really predicates on the input `Y`.
+fn collect_aliases(tokens: &[Token]) -> HashMap<String, String> {
+    let mut writes: HashMap<&str, usize> = HashMap::new();
+    for i in 1..tokens.len() {
+        let lhs = &tokens[i - 1];
+        if tokens[i].token_type == TokenType::ASSIGN
+            && lhs.token_type == TokenType::Identifier
+            && statement_context(tokens, i - 1)
+        {
+            *writes.entry(lhs.text.as_str()).or_default() += 1;
+        }
+    }
+    let mut out = HashMap::new();
+    let mut depth = 0i32;
+    for i in 0..tokens.len() {
+        match tokens[i].token_type {
+            TokenType::KwDo => depth += 1,
+            TokenType::KwEnd => depth -= 1,
+            _ => {}
+        }
+        let at_statement_start = i == 0 || is(tokens, i - 1, TokenType::SEMI);
+        if depth == 0
+            && at_statement_start
+            && is(tokens, i, TokenType::Identifier)
+            && is(tokens, i + 1, TokenType::ASSIGN)
+            && is(tokens, i + 2, TokenType::Identifier)
+            && is(tokens, i + 3, TokenType::SEMI)
+            && tokens[i].text != tokens[i + 2].text
+            && writes.get(tokens[i].text.as_str()) == Some(&1)
+        {
+            out.insert(tokens[i].text.clone(), tokens[i + 2].text.clone());
+        }
+    }
+    out
+}
+
 /// True iff walking back from `ident_idx` hits a statement-boundary token
 /// before any predicate-opener.
 fn statement_context(tokens: &[Token], ident_idx: usize) -> bool {
@@ -848,6 +966,7 @@ fn statement_context(tokens: &[Token], ident_idx: usize) -> bool {
 struct Walker<'a> {
     tokens: &'a [Token],
     arrays: &'a HashMap<String, ArrayDecl>,
+    aliases: &'a HashMap<String, String>,
     used: HashSet<String>,
     preds: Vec<Pred>,
     branches: Vec<Branch>,
@@ -880,8 +999,13 @@ impl Walker<'_> {
                     let in_else = arm.is_some();
                     let here = arm.take().unwrap_or_else(|| reach.clone());
                     let j = if_head_end(tokens, i + 1);
-                    let pred = PredicateParser::new(&tokens[i + 1..j], self.arrays, &mut self.used)
-                        .parse();
+                    let pred = PredicateParser::new(
+                        &tokens[i + 1..j],
+                        self.arrays,
+                        self.aliases,
+                        &mut self.used,
+                    )
+                    .parse();
                     capture_predicate(&mut self.preds, context, &pred);
                     self.branches.push(Branch {
                         line: tokens[i].start_line,
@@ -1034,6 +1158,7 @@ struct PredicateParser<'a> {
     t: &'a [Token],
     i: usize,
     arrays: &'a HashMap<String, ArrayDecl>,
+    aliases: &'a HashMap<String, String>,
     used: &'a mut HashSet<String>,
 }
 
@@ -1041,14 +1166,30 @@ impl<'a> PredicateParser<'a> {
     fn new(
         t: &'a [Token],
         arrays: &'a HashMap<String, ArrayDecl>,
+        aliases: &'a HashMap<String, String>,
         used: &'a mut HashSet<String>,
     ) -> Self {
         PredicateParser {
             t,
             i: 0,
             arrays,
+            aliases,
             used,
         }
+    }
+
+    /// The variable `var` copies, through any chain of [`collect_aliases`].
+    fn resolve(&self, var: String) -> String {
+        let mut var = var;
+        let mut hops = 0;
+        while let Some(src) = self.aliases.get(&var) {
+            hops += 1;
+            if hops > self.aliases.len() {
+                break;
+            }
+            var = src.clone();
+        }
+        var
     }
 
     fn parse(&mut self) -> Pred {
@@ -1188,6 +1329,7 @@ impl<'a> PredicateParser<'a> {
     }
 
     fn atom(&mut self, var: String, op: Op, values: Vec<Value>) -> Pred {
+        let var = self.resolve(var);
         self.used.insert(var.clone());
         let is_array = self.arrays.contains_key(&var);
         Pred::Atom(Atom {
@@ -1212,7 +1354,7 @@ impl<'a> PredicateParser<'a> {
                         break;
                     }
                 }
-                TokenType::Identifier if depth == 1 => args.push(t.text.clone()),
+                TokenType::Identifier if depth == 1 => args.push(self.resolve(t.text.clone())),
                 _ => {}
             }
             self.i += 1;
@@ -1477,7 +1619,7 @@ fn build_value_sets(
     for var in inputs {
         let set = sets.entry(var.clone()).or_default();
         if let Some(spec) = specs.lookup(var) {
-            set.extend(metadata_values(&spec.kind).into_iter().map(Value::Int));
+            set.extend(metadata_values(&spec.kind));
         }
         set.push(if char_inputs.contains(var) {
             Value::Str(String::new())
@@ -1501,7 +1643,7 @@ fn build_value_sets(
 /// Up to 9 representative values from a metadata spec — first, last, and
 /// a handful of midpoints. Some specs span thousands of values (ages,
 /// dollar amounts) so we don't enumerate fully.
-fn metadata_values(kind: &SpecKind) -> Vec<i64> {
+fn metadata_values(kind: &SpecKind) -> Vec<Value> {
     match kind {
         SpecKind::Range(lo, hi) => {
             if hi < lo {
@@ -1509,16 +1651,67 @@ fn metadata_values(kind: &SpecKind) -> Vec<i64> {
             }
             let size = hi - lo + 1;
             if size <= 9 {
-                return (*lo..=*hi).collect();
+                return (*lo..=*hi).map(Value::Int).collect();
             }
             let mut out = vec![*lo];
             out.extend((1..=7).map(|k| lo + size * k / 8));
             out.push(*hi);
             out.dedup();
+            out.into_iter().map(Value::Int).collect()
+        }
+        SpecKind::Set(values) => values.iter().copied().map(Value::Int).collect(),
+        SpecKind::Decimal(lo, hi) => decimal_slices(*lo, *hi),
+    }
+}
+
+/// The edges of a documented domain [`minimal`] makes sure some row hits:
+/// its min and max, and one step outside each (1 for integer specs; the
+/// finest decimal place of the bounds, at least 0.1, for decimal ranges).
+fn boundary_values(kind: &SpecKind) -> Vec<Value> {
+    let ints = |lo: i64, hi: i64| {
+        let mut out: Vec<Value> = [lo - 1, lo, hi, hi + 1]
+            .into_iter()
+            .map(Value::Int)
+            .collect();
+        out.dedup();
+        out
+    };
+    match kind {
+        SpecKind::Range(lo, hi) if lo <= hi => ints(*lo, *hi),
+        SpecKind::Set(values) => match (values.iter().min(), values.iter().max()) {
+            (Some(lo), Some(hi)) => ints(*lo, *hi),
+            _ => Vec::new(),
+        },
+        SpecKind::Decimal(lo, hi) if lo <= hi => {
+            let places = |x: f64| x.to_string().split('.').nth(1).map_or(0, str::len);
+            let step = 10f64.powi(-(places(*lo).max(places(*hi)).max(1) as i32));
+            let round = |x: f64| Value::Float((x * 1e9).round() / 1e9);
+            let mut out = vec![round(lo - step), round(*lo), round(*hi), round(hi + step)];
+            out.dedup();
             out
         }
-        SpecKind::Set(values) => values.clone(),
+        _ => Vec::new(),
     }
+}
+
+/// The bounds of [`DECIMAL_SLICES`] equal slices of `lo..=hi`.
+fn decimal_slices(lo: f64, hi: f64) -> Vec<Value> {
+    if hi < lo {
+        return Vec::new();
+    }
+    let mut out: Vec<Value> = (0..=DECIMAL_SLICES)
+        .map(|k| {
+            let x = if k == DECIMAL_SLICES {
+                hi
+            } else {
+                lo + (hi - lo) * k as f64 / DECIMAL_SLICES as f64
+            };
+            // Round off float noise (0.1 * 3 → 0.30000000000000004).
+            Value::Float((x * 1e9).round() / 1e9)
+        })
+        .collect();
+    out.dedup();
+    out
 }
 
 fn build_default_row(
@@ -2216,6 +2409,29 @@ mod tests {
         );
         assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
         assert!(rows.len() <= 2);
+    }
+
+    #[test]
+    fn recode_copies_alias_predicates_to_their_inputs() {
+        let src = "raw_smoke = raw_smoke;\nraw_drink = raw_drink;\n\
+                   smoke = raw_smoke;\ndrink = raw_drink;\n\
+                   if smoke in (0,1,2) and drink in (0,1,2,3) then do;\n\
+                     if smoke in (1,2) or drink = 3 then flag = 1;\n\
+                   end;\n";
+        let g = graph(src);
+        assert_eq!(g.inputs, vec!["raw_drink", "raw_smoke"]);
+        let (rows, cov) = minimal_rows(src);
+        assert_eq!((cov.covered(), cov.total, rows.len()), (4, 4, 3));
+    }
+
+    #[test]
+    fn reassigned_or_conditional_copies_are_not_aliases() {
+        let g = graph(
+            "a = x;\nif x = 9 then a = 0;\n\
+             if y = 1 then do; b = z; end;\n\
+             if a = 1 and b = 2 then c = 1;\n",
+        );
+        assert_eq!(g.inputs, vec!["x", "y"]);
     }
 
     #[test]
