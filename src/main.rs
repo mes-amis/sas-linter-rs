@@ -1,18 +1,26 @@
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
-use sas_linter::{rules, Config, Formatter, Linter};
+use sas_linter::encoding::read_source;
+use sas_linter::value_specs::{SpecSource, ValueSpecs};
+use sas_linter::{rules, synthesize, Config, Formatter, Linter};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "sas-lint",
     version,
-    about = "Configurable lint engine for SAS source files."
+    about = "Configurable lint engine for SAS source files.",
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// YAML config file. Missing file → run with built-in defaults.
     #[arg(long, default_value = "config/lint.yaml")]
     config: PathBuf,
@@ -41,6 +49,47 @@ struct Cli {
     files: Vec<PathBuf>,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Synthesize input testdata (CSV) from each SAS source's logic graph.
+    ///
+    /// Walks the source's arrays, assignments, and `if`-head predicates,
+    /// builds per-input value sets (seeded from the
+    /// `variable_value_out_of_known_range` metadata CSVs in --config, when
+    /// configured), and writes --size sampled rows per source. Each row
+    /// is drawn from one of five strategies: baseline (everything at
+    /// default), single (satisfy one predicate), combo (satisfy 2–6 at
+    /// once), perturbation (baseline plus a few random cell flips), and
+    /// chaos (uniform sampling). Deterministic for a given --seed.
+    Synthesize(SynthesizeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct SynthesizeArgs {
+    /// Output directory (writes <dir>/<source stem>.csv per source), or a
+    /// `.csv` file path when synthesizing a single source.
+    #[arg(short = 'o', long = "output")]
+    output: PathBuf,
+
+    /// Number of rows to sample per source.
+    #[arg(long, default_value_t = synthesize::DEFAULT_SIZE as u64,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    size: u64,
+
+    /// RNG seed.
+    #[arg(long, default_value_t = synthesize::DEFAULT_SEED)]
+    seed: u64,
+
+    /// YAML config whose `variable_value_out_of_known_range` options
+    /// locate the acceptable-values metadata. Missing file → no metadata.
+    #[arg(long, default_value = "config/lint.yaml")]
+    config: PathBuf,
+
+    /// SAS source files.
+    #[arg(required = true)]
+    sources: Vec<PathBuf>,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -53,6 +102,10 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+
+    if let Some(Command::Synthesize(args)) = &cli.command {
+        return run_synthesize(args);
+    }
 
     if cli.list_rules {
         for meta in rules::all_metas() {
@@ -119,5 +172,64 @@ fn run() -> Result<ExitCode> {
         }
     }
 
+    Ok(ExitCode::from(exit_code))
+}
+
+fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
+    let single_file = args
+        .output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+    if single_file && args.sources.len() > 1 {
+        eprintln!(
+            "sas-lint synthesize: {} is a file but {} sources were given; pass a directory to -o",
+            args.output.display(),
+            args.sources.len()
+        );
+        return Ok(ExitCode::from(2));
+    }
+
+    let cfg = Config::load(&args.config)?;
+    let specs = match cfg.rules.get("variable_value_out_of_known_range") {
+        Some(opts) => SpecSource::from_opts(opts)?.load(),
+        None => ValueSpecs::default(),
+    };
+
+    let out_dir = if single_file {
+        args.output.parent().unwrap_or(Path::new("")).to_path_buf()
+    } else {
+        args.output.clone()
+    };
+    if !out_dir.as_os_str().is_empty() {
+        fs::create_dir_all(&out_dir)
+            .with_context(|| format!("creating output directory {}", out_dir.display()))?;
+    }
+
+    let mut exit_code: u8 = 0;
+    for source in &args.sources {
+        if !source.is_file() {
+            eprintln!("sas-lint synthesize: {}: no such file", source.display());
+            exit_code = 2;
+            continue;
+        }
+        let text = read_source(source).with_context(|| format!("reading {}", source.display()))?;
+        let result = synthesize::sample(&text, &specs, args.size as usize, args.seed);
+        let out_path = if single_file {
+            args.output.clone()
+        } else {
+            out_dir.join(format!("{}.csv", synthesize::output_stem(source)))
+        };
+        let file =
+            File::create(&out_path).with_context(|| format!("creating {}", out_path.display()))?;
+        result
+            .write_csv(BufWriter::new(file))
+            .with_context(|| format!("writing {}", out_path.display()))?;
+        println!(
+            "Wrote {} row(s) over {} input(s) to {}",
+            result.rows.len(),
+            result.headers.len(),
+            out_path.display()
+        );
+    }
     Ok(ExitCode::from(exit_code))
 }

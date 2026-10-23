@@ -1,50 +1,24 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use sas_lexer::TokenType;
 
-use crate::config::{opt_bool, opt_seq_str, opt_str};
+use crate::config::opt_bool;
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::Token;
+use crate::value_specs::{Spec, SpecKind, SpecSource, ValueSpecs};
 
 use super::RuleMeta;
 
 pub struct VariableValueOutOfKnownRange {
-    csv_paths: Vec<PathBuf>,
-    name_column: String,
-    values_column: String,
-    name_match: NameMatch,
-    delimiter: u8,
+    source: SpecSource,
     autofix: bool,
-    specs: OnceLock<HashMap<String, Spec>>,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum NameMatch {
-    CaseInsensitive,
-    Exact,
-}
-
-#[derive(Debug, Clone)]
-enum SpecKind {
-    Range(i64, i64),
-    Set(Vec<i64>),
-}
-
-#[derive(Debug, Clone)]
-struct Spec {
-    kind: SpecKind,
+    specs: OnceLock<ValueSpecs>,
 }
 
 const ID: &str = "variable_value_out_of_known_range";
 const DESCRIPTION: &str = "Comparison literal falls outside a variable's \
                             documented acceptable values — branch is unreachable.";
-const DEFAULT_NAME_COLUMN: &str = "Variable";
-const DEFAULT_VALUES_COLUMN: &str = "Acceptable Values";
 
 pub fn meta() -> RuleMeta {
     RuleMeta {
@@ -53,40 +27,14 @@ pub fn meta() -> RuleMeta {
         supports_autofix: false,
         default_factory: || {
             Box::new(VariableValueOutOfKnownRange {
-                csv_paths: Vec::new(),
-                name_column: DEFAULT_NAME_COLUMN.into(),
-                values_column: DEFAULT_VALUES_COLUMN.into(),
-                name_match: NameMatch::CaseInsensitive,
-                delimiter: b',',
+                source: SpecSource::default(),
                 autofix: false,
                 specs: OnceLock::new(),
             })
         },
         config_factory: |opts| {
-            let csv_paths = opt_seq_str(opts, "csv_paths")
-                .into_iter()
-                .map(PathBuf::from)
-                .collect();
-            let name_match = match opt_str(opts, "name_match").unwrap_or("case_insensitive") {
-                "exact" => NameMatch::Exact,
-                "case_insensitive" => NameMatch::CaseInsensitive,
-                other => anyhow::bail!(
-                    "name_match must be 'case_insensitive' or 'exact' (got {:?})",
-                    other
-                ),
-            };
-            let delimiter = opt_str(opts, "delimiter").unwrap_or(",");
-            let delimiter = delimiter.as_bytes().first().copied().unwrap_or(b',');
             Ok(Box::new(VariableValueOutOfKnownRange {
-                csv_paths,
-                name_column: opt_str(opts, "name_column")
-                    .unwrap_or(DEFAULT_NAME_COLUMN)
-                    .into(),
-                values_column: opt_str(opts, "values_column")
-                    .unwrap_or(DEFAULT_VALUES_COLUMN)
-                    .into(),
-                name_match,
-                delimiter,
+                source: SpecSource::from_opts(opts)?,
                 autofix: opt_bool(opts, "autofix").unwrap_or(false),
                 specs: OnceLock::new(),
             }))
@@ -147,57 +95,8 @@ impl Rule for VariableValueOutOfKnownRange {
 }
 
 impl VariableValueOutOfKnownRange {
-    fn specs(&self) -> &HashMap<String, Spec> {
-        self.specs.get_or_init(|| self.load_specs())
-    }
-
-    fn load_specs(&self) -> HashMap<String, Spec> {
-        let mut map = HashMap::new();
-        for path in &self.csv_paths {
-            if !path.is_file() {
-                continue;
-            }
-            let Ok(mut rdr) = csv::ReaderBuilder::new()
-                .delimiter(self.delimiter)
-                .has_headers(true)
-                .from_path(path)
-            else {
-                continue;
-            };
-            let headers = match rdr.headers() {
-                Ok(h) => h.clone(),
-                Err(_) => continue,
-            };
-            let name_col = headers.iter().position(|h| h == self.name_column);
-            let values_col = headers.iter().position(|h| h == self.values_column);
-            let (Some(name_col), Some(values_col)) = (name_col, values_col) else {
-                continue;
-            };
-            for record in rdr.records().flatten() {
-                let name = record.get(name_col).unwrap_or("").trim();
-                let values_text = record.get(values_col).unwrap_or("").trim();
-                if name.is_empty() || values_text.is_empty() {
-                    continue;
-                }
-                let Some(spec) = parse_values(values_text) else {
-                    continue;
-                };
-                let key = match self.name_match {
-                    NameMatch::Exact => name.to_string(),
-                    NameMatch::CaseInsensitive => name.to_lowercase(),
-                };
-                map.insert(key, spec);
-            }
-        }
-        map
-    }
-
-    fn lookup<'a>(&self, text: &str, specs: &'a HashMap<String, Spec>) -> Option<&'a Spec> {
-        let key = match self.name_match {
-            NameMatch::Exact => text.to_string(),
-            NameMatch::CaseInsensitive => text.to_lowercase(),
-        };
-        specs.get(&key)
+    fn specs(&self) -> &ValueSpecs {
+        self.specs.get_or_init(|| self.source.load())
     }
 
     fn check_comparison(
@@ -207,9 +106,9 @@ impl VariableValueOutOfKnownRange {
         ident: &Token,
         op: &Token,
         path: &str,
-        specs: &HashMap<String, Spec>,
+        specs: &ValueSpecs,
     ) -> (usize, Vec<Finding>) {
-        let Some(spec) = self.lookup(&ident.text, specs) else {
+        let Some(spec) = specs.lookup(&ident.text) else {
             return (0, vec![]);
         };
 
@@ -306,61 +205,6 @@ fn value_allowed(spec: &Spec, lit: &Literal) -> bool {
         SpecKind::Range(lo, hi) => lit.value >= *lo && lit.value <= *hi,
         SpecKind::Set(values) => values.contains(&lit.value),
     }
-}
-
-static RE_RANGE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(-?\d+)-(-?\d+)$").unwrap());
-static RE_SET: Lazy<Regex> = Lazy::new(|| Regex::new(r"^-?\d+(?:\s*,\s*-?\d+)+$").unwrap());
-static RE_RANGE_PAREN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(\d+)-(\d+)\s+\(([^)]+)\)$").unwrap());
-static RE_RANGE_PLUS: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d+)-(\d+)\s*,\s*(.+)$").unwrap());
-
-fn parse_values(text: &str) -> Option<Spec> {
-    if let Some(c) = RE_RANGE.captures(text) {
-        let lo: i64 = c[1].parse().ok()?;
-        let hi: i64 = c[2].parse().ok()?;
-        return Some(Spec {
-            kind: SpecKind::Range(lo, hi),
-        });
-    }
-    if RE_SET.is_match(text) {
-        let vals: Vec<i64> = text
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        return Some(Spec {
-            kind: SpecKind::Set(vals),
-        });
-    }
-    if let Some(c) = RE_RANGE_PAREN.captures(text) {
-        let lo: i64 = c[1].parse().ok()?;
-        let hi: i64 = c[2].parse().ok()?;
-        let mut vals: Vec<i64> = (lo..=hi).collect();
-        for x in c[3].split(',') {
-            if let Ok(n) = x.trim().parse::<i64>() {
-                vals.push(n);
-            }
-        }
-        return Some(Spec {
-            kind: SpecKind::Set(vals),
-        });
-    }
-    if let Some(c) = RE_RANGE_PLUS.captures(text) {
-        let lo: i64 = c[1].parse().ok()?;
-        let hi: i64 = c[2].parse().ok()?;
-        let extras: Vec<i64> = c[3]
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        if extras.is_empty() {
-            return None;
-        }
-        let mut vals: Vec<i64> = (lo..=hi).collect();
-        vals.extend(extras);
-        return Some(Spec {
-            kind: SpecKind::Set(vals),
-        });
-    }
-    None
 }
 
 fn format_message(ident: &str, display: &str, spec: &Spec) -> String {

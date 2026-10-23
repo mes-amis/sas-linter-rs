@@ -6,7 +6,9 @@ pub mod formatter;
 pub mod linter;
 pub mod rule;
 pub mod rules;
+pub mod synthesize;
 pub mod token;
+pub mod value_specs;
 
 pub use config::Config;
 pub use finding::{Finding, Severity};
