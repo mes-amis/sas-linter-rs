@@ -74,8 +74,14 @@ impl Rule for UnterminatedComment {
         }
         let mut owned: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
         for i in bad {
-            let trimmed = owned[i].trim_end_matches([' ', '\t']).to_string();
-            owned[i] = format!("{};", trimmed);
+            // Lines are split on `\n`, so a CRLF line still carries its `\r`;
+            // insert the `;` before it rather than between `\r` and `\n`.
+            let (body, cr) = match owned[i].strip_suffix('\r') {
+                Some(body) => (body, "\r"),
+                None => (owned[i].as_str(), ""),
+            };
+            let trimmed = body.trim_end_matches([' ', '\t']);
+            owned[i] = format!("{};{}", trimmed, cr);
         }
         owned.join("\n")
     }
@@ -114,4 +120,37 @@ fn bad_line_indices(all_tokens: &[crate::token::Token], lines: &[&str]) -> Vec<u
 /// final empty string. `str::split('\n')` already does this.
 fn split_keep_empty(s: &str) -> Vec<&str> {
     s.split('\n').collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fix(src: &str) -> String {
+        UnterminatedComment { autofix: true }.autofix(src)
+    }
+
+    #[test]
+    fn autofix_appends_semicolon_on_lf() {
+        assert_eq!(
+            fix("data x;\n** COMMENT **\nx = 1;\nrun;\n"),
+            "data x;\n** COMMENT **;\nx = 1;\nrun;\n"
+        );
+    }
+
+    #[test]
+    fn autofix_inserts_semicolon_before_cr_on_crlf() {
+        assert_eq!(
+            fix("data x;\r\n** COMMENT **\r\nx = 1;\r\nrun;\r\n"),
+            "data x;\r\n** COMMENT **;\r\nx = 1;\r\nrun;\r\n"
+        );
+    }
+
+    #[test]
+    fn autofix_strips_trailing_blanks_before_cr() {
+        assert_eq!(
+            fix("data x;\r\n** COMMENT ** \t\r\nx = 1;\r\nrun;\r\n"),
+            "data x;\r\n** COMMENT **;\r\nx = 1;\r\nrun;\r\n"
+        );
+    }
 }
