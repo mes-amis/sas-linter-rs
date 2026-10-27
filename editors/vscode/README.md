@@ -3,6 +3,7 @@
 Lint and format SAS source files using the [sas-linter-rs](https://github.com/mes-amis/sas-linter-rs) `sas-lint` binary.
 
 - **Diagnostics**: rule findings as squiggles on save (configurable: `onSave` / `onType` / `manual`).
+- **Project-wide linting**: on workspace load, every SAS file is linted from disk and reported in the Problems panel — not just open editors. "SAS file" means `*.sas` plus any `files.associations` glob mapped to `sas`, e.g. `"**/sources/*.txt": "sas"`. Changing the associations, `files.exclude`, or the lint config re-runs the pass, and files changed on disk (git checkout, external edits) are re-linted. Open files are linted from the live buffer instead. Set `sasLinter.scope` to `openFiles` to opt out.
 - **Format Document**: wires `sas-lint --format` to VSCode's format-document hook. Respects the same YAML `[format]` block as the CLI.
 - **Quick Fix**: per-rule autofix code action for any rule that supports it.
 - **Fix all**: command palette → `SAS Linter: Run all autofixes on current file`.
@@ -17,6 +18,7 @@ The extension auto-downloads the matching `sas-lint` binary from GitHub Releases
 | `sasLinter.version` | `""` | Release tag of the `sas-lint` binary to auto-download (e.g. `v0.3.2`; a bare `0.3.2` also works). Empty = the version pinned by the extension. Changing it triggers a download and re-lint immediately. |
 | `sasLinter.config` | `""` | Path to a sas-linter YAML config (workspace-relative or absolute). Empty = sas-lint's default lookup (`config/lint.yaml` in cwd). |
 | `sasLinter.run` | `onSave` | When to run the linter: `onSave`, `onType`, or `manual`. |
+| `sasLinter.scope` | `workspace` | `workspace` lints every SAS file in the project (per `files.associations`); `openFiles` lints only open editors. Ignored when `sasLinter.run` is `manual` — use `SAS Linter: Lint all SAS files in workspace` instead. |
 | `sasLinter.format.enabled` | `true` | Register `sas-lint --format` as the SAS document formatter. |
 
 ## Development

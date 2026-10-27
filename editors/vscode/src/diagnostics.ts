@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { resolveBinary } from "./binary";
@@ -19,7 +20,8 @@ import {
  */
 const FINDING_RE = /^(.+?):(\d+):(\d+): \[([A-Za-z_][A-Za-z0-9_]*)\] (.+)$/;
 
-interface ParsedFinding {
+export interface ParsedFinding {
+  path: string;
   line: number;
   column: number;
   rule: string;
@@ -34,6 +36,7 @@ function parseFindings(stdout: string): ParsedFinding[] {
     const m = FINDING_RE.exec(line);
     if (!m) continue;
     out.push({
+      path: m[1],
       line: Number(m[2]),
       column: Number(m[3]),
       rule: m[4],
@@ -43,13 +46,26 @@ function parseFindings(stdout: string): ParsedFinding[] {
   return out;
 }
 
-function findingToDiagnostic(f: ParsedFinding, doc: vscode.TextDocument): vscode.Diagnostic {
+/**
+ * Findings from a multi-file run, keyed by absolute path (sas-lint echoes
+ * each path as given on argv, resolved here against `cwd`).
+ */
+export function groupFindingsByFile(stdout: string, cwd: string): Map<string, ParsedFinding[]> {
+  const out = new Map<string, ParsedFinding[]>();
+  for (const f of parseFindings(stdout)) {
+    const key = path.resolve(cwd, f.path);
+    out.set(key, [...(out.get(key) ?? []), f]);
+  }
+  return out;
+}
+
+function findingToDiagnostic(f: ParsedFinding, lineText: (line: number) => string): vscode.Diagnostic {
   // sas-lint emits 1-based line and 1-based column (rule code adds +1 before
   // emit; see src/finding.rs). VSCode wants 0-based.
   const line = Math.max(0, f.line - 1);
   const col = Math.max(0, f.column - 1);
-  const lineText = line < doc.lineCount ? doc.lineAt(line).text : "";
-  const endCol = Math.min(lineText.length, Math.max(col + 1, lineText.length));
+  const text = lineText(line);
+  const endCol = Math.min(text.length, Math.max(col + 1, text.length));
   const range = new vscode.Range(line, col, line, endCol);
   const diag = new vscode.Diagnostic(range, f.message, vscode.DiagnosticSeverity.Warning);
   diag.source = "sas-linter";
@@ -88,6 +104,29 @@ export class DiagnosticsRunner {
     this.collection.delete(doc.uri);
   }
 
+  delete(uri: vscode.Uri): void {
+    this.collection.delete(uri);
+  }
+
+  /** Publish findings for a file linted from disk rather than an open buffer. */
+  set(uri: vscode.Uri, findings: ParsedFinding[], lineText: (line: number) => string): void {
+    this.collection.set(uri, findings.map((f) => findingToDiagnostic(f, lineText)));
+  }
+
+  /** Drop diagnostics for every file `keep` rejects. */
+  retainOnly(keep: (uri: vscode.Uri) => boolean): void {
+    const drop: vscode.Uri[] = [];
+    this.collection.forEach((uri) => {
+      if (!keep(uri)) drop.push(uri);
+    });
+    for (const uri of drop) this.collection.delete(uri);
+  }
+
+  /** Re-lint every open SAS document (e.g. after the lint config changed). */
+  rerunOpen(): void {
+    for (const doc of vscode.workspace.textDocuments) this.scheduleRun(doc);
+  }
+
   async runNow(doc: vscode.TextDocument): Promise<void> {
     if (doc.languageId !== "sas") return;
 
@@ -110,7 +149,8 @@ export class DiagnosticsRunner {
         return;
       }
       const findings = parseFindings(result.stdout);
-      const diagnostics = findings.map((f) => findingToDiagnostic(f, doc));
+      const lineText = (n: number): string => (n < doc.lineCount ? doc.lineAt(n).text : "");
+      const diagnostics = findings.map((f) => findingToDiagnostic(f, lineText));
       this.collection.set(doc.uri, diagnostics);
     } finally {
       cleanupTemp(tmp);

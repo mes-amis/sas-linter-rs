@@ -2,7 +2,7 @@
   "name": "sas-linter-vscode",
   "displayName": "SAS Linter",
   "description": "Lint and format SAS source files via the sas-lint binary.",
-  "version": "0.3.11",
+  "version": "0.4.0",
   "publisher": "mes-amis",
   "license": "AGPL-3.0-or-later",
   "repository": {
@@ -19,7 +19,8 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onLanguage:sas"
+    "onLanguage:sas",
+    "onStartupFinished"
   ],
   "contributes": {
     "languages": [
@@ -38,6 +39,10 @@
       {
         "command": "sasLinter.lintFile",
         "title": "SAS Linter: Lint current file"
+      },
+      {
+        "command": "sasLinter.lintWorkspace",
+        "title": "SAS Linter: Lint all SAS files in workspace"
       },
       {
         "command": "sasLinter.fixAll",
@@ -77,6 +82,19 @@
           ],
           "default": "onSave",
           "description": "When to run the linter."
+        },
+        "sasLinter.scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "openFiles"
+          ],
+          "enumDescriptions": [
+            "Lint every SAS file in the workspace \u2014 *.sas plus any files.associations glob mapped to sas \u2014 on load, when the associations change, and when files change on disk.",
+            "Lint only files open in an editor."
+          ],
+          "default": "workspace",
+          "description": "Which files the linter reports on. Ignored when sasLinter.run is manual."
         },
         "sasLinter.format.enabled": {
           "type": "boolean",
