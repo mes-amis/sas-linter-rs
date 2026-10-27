@@ -72,19 +72,19 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
-The current extension release is **vscode-v0.3.11** (also kept in step by `tests/release_versions.rs`).
+The current extension release is **vscode-v0.4.0** (also kept in step by `tests/release_versions.rs`).
 
 **macOS / Linux**
 
 ```sh
-curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.11/sas-linter-vscode-0.3.11.vsix
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.0/sas-linter-vscode-0.4.0.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.3.11/sas-linter-vscode-0.3.11.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.0/sas-linter-vscode-0.4.0.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
 code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 

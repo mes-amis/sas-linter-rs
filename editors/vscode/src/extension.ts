@@ -4,14 +4,33 @@ import { resolveBinary } from "./binary";
 import { registerCodeActions } from "./codeActions";
 import { DiagnosticsRunner } from "./diagnostics";
 import { SasFormatter } from "./format";
+import { WorkspaceLinter } from "./workspace";
 
 export function activate(context: vscode.ExtensionContext): void {
   const diagnostics = new DiagnosticsRunner(context);
   context.subscriptions.push({ dispose: () => diagnostics.dispose() });
 
+  const workspace = new WorkspaceLinter(context, diagnostics);
+  context.subscriptions.push(workspace);
+
   // Run mode wiring.
   const runMode = (): string =>
     vscode.workspace.getConfiguration("sasLinter").get<string>("run") ?? "onSave";
+  const workspaceScope = (): boolean =>
+    runMode() !== "manual" &&
+    vscode.workspace.getConfiguration("sasLinter").get<string>("scope", "workspace") === "workspace";
+
+  // Lint every SAS file in the project (per `files.associations`), or stand
+  // down to open-files-only and drop the from-disk diagnostics.
+  const refreshWorkspace = (): void => {
+    if (workspaceScope()) {
+      void workspace.lintAll();
+    } else {
+      workspace.stop();
+      const open = new Set(vscode.workspace.textDocuments.map((d) => d.uri.toString()));
+      diagnostics.retainOnly((uri) => open.has(uri.toString()));
+    }
+  };
 
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((doc) => {
@@ -23,13 +42,41 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (runMode() === "onType") diagnostics.scheduleRun(e.document);
     }),
-    vscode.workspace.onDidCloseTextDocument((doc) => diagnostics.clear(doc)),
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      // A project file keeps its findings once closed — re-read from disk in
+      // case unsaved edits were discarded.
+      if (workspaceScope() && workspace.has(doc.uri)) {
+        void workspace.lintFiles([doc.uri]);
+      } else {
+        diagnostics.clear(doc);
+      }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => refreshWorkspace()),
   );
 
   // Lint anything already open at activation time.
   for (const doc of vscode.workspace.textDocuments) {
     if (runMode() !== "manual") diagnostics.scheduleRun(doc);
   }
+  if (workspaceScope()) void workspace.lintAll();
+
+  // Changing which files count as SAS, or how they're linted, re-runs the
+  // project-wide pass.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      const scopeChanged =
+        e.affectsConfiguration("files.associations") ||
+        e.affectsConfiguration("files.exclude") ||
+        e.affectsConfiguration("sasLinter.scope") ||
+        e.affectsConfiguration("sasLinter.run");
+      if (e.affectsConfiguration("sasLinter.config")) {
+        if (runMode() !== "manual") diagnostics.rerunOpen();
+        refreshWorkspace();
+      } else if (scopeChanged) {
+        refreshWorkspace();
+      }
+    }),
+  );
 
   // Re-resolve the binary when the pinned version or path changes —
   // downloads the newly selected release immediately (with progress
@@ -51,6 +98,7 @@ export function activate(context: vscode.ExtensionContext): void {
       for (const doc of vscode.workspace.textDocuments) {
         if (runMode() !== "manual") diagnostics.scheduleRun(doc);
       }
+      if (workspaceScope()) void workspace.lintAll();
     }),
   );
 
@@ -82,6 +130,9 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       await diagnostics.runNow(editor.document);
+    }),
+    vscode.commands.registerCommand("sasLinter.lintWorkspace", async () => {
+      await workspace.lintAll(/* watch */ workspaceScope());
     }),
     vscode.commands.registerCommand("sasLinter.downloadBinary", async () => {
       try {
