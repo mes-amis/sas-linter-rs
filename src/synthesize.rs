@@ -1074,9 +1074,9 @@ fn pred_size(node: &Pred) -> usize {
 /// the conditions under which `X` ends up with a value satisfying it: for
 /// each definition `i` whose value qualifies, its condition and the
 /// failure of every later definition (the last assignment wins); plus, if
-/// missing qualifies, no definition firing at all. Atoms no definition can
-/// satisfy, or whose rewrite exceeds [`DERIVED_BUDGET`], are left as they
-/// are.
+/// missing qualifies, no definition firing at all. An atom nothing can
+/// satisfy becomes an empty OR, which is false; one whose rewrite exceeds
+/// [`DERIVED_BUDGET`] is left as it is.
 fn substitute_derived(node: &Pred, derived: &HashMap<String, Vec<Def>>, depth: usize) -> Pred {
     substitute_cached(node, derived, depth, &mut HashMap::new())
 }
@@ -1171,24 +1171,18 @@ fn substitute_cached(
                     let mut all: Vec<Pred> = d.cond.iter().map(|p| recur(p, cache)).collect();
                     all.extend(value_ok);
                     all.append(&mut later);
-                    alts.push(if all.is_empty() {
-                        Pred::Tautology
-                    } else {
-                        Pred::And(all)
-                    });
+                    // An empty AND (always reached) is true.
+                    alts.push(Pred::And(all));
                 }
             }
             if holds(a.op, &Value::Missing, &a.values) == Some(true) {
                 if let Some(none) = none_after(0, None) {
-                    alts.push(if none.is_empty() {
-                        Pred::Tautology
-                    } else {
-                        Pred::And(none)
-                    });
+                    alts.push(Pred::And(none));
                 }
             }
+            // No alternative: every assignment is modelled and none (nor
+            // missing) satisfies the atom, so it is false. An empty OR is.
             let out = match alts.len() {
-                0 => node.clone(),
                 1 => alts.pop().unwrap(),
                 _ => Pred::Or(alts),
             };
@@ -1215,15 +1209,13 @@ fn substitute_cached(
     }
 }
 
-/// Definition `j`, later than `i`, is reached only by an `else` of `i`'s
-/// own `if`, so the two can't both fire.
+/// Definitions `i` and `j` can't both fire: one is reached only through
+/// a condition the other is reached only through the `else` of, at any
+/// depth of nested `if … then do;` blocks.
 fn exclusive(defs: &[Def], i: usize, j: usize) -> bool {
-    defs[i].cond.last().is_some_and(|leaf| {
-        defs[j]
-            .cond
-            .iter()
-            .any(|c| matches!(c, Pred::Not(p) if **p == *leaf))
-    })
+    let negates =
+        |a: &[Pred], b: &[Pred]| b.iter().any(|c| matches!(c, Pred::Not(p) if a.contains(p)));
+    negates(&defs[i].cond, &defs[j].cond) || negates(&defs[j].cond, &defs[i].cond)
 }
 
 /// [`substitute_derived`] for an atom on a counter (`X = 0; … if c then
@@ -2019,6 +2011,13 @@ impl<'a> PredicateParser<'a> {
                 return p;
             }
         }
+        if ident && next_lparen && self.t[self.i].text.eq_ignore_ascii_case("max") {
+            let save = self.i;
+            if let Some(p) = self.parse_max() {
+                return p;
+            }
+            self.i = save;
+        }
         if ty(self.t, self.i).is_some_and(is_literal)
             && ty(self.t, self.i + 1).and_then(cmp_op).is_some()
             && self.peek_at(self.i + 2, TokenType::Identifier)
@@ -2118,7 +2117,57 @@ impl<'a> PredicateParser<'a> {
     }
 
     fn parse_sum(&mut self) -> Option<Pred> {
-        self.i += 2; // sum (
+        let args = self.parse_call_args()?;
+        let op = ty(self.t, self.i).and_then(cmp_op)?;
+        self.i += 1;
+        let value = self.consume_literal().filter(Value::is_numeric)?;
+        self.used.extend(args.iter().cloned());
+        Some(Pred::Sum(SumAtom {
+            vars: args,
+            op,
+            value,
+        }))
+    }
+
+    /// `max( ident, … ) cmp_op LITERAL` or `max( … ) IN ( … )`. A SAS
+    /// missing value sorts below every number, and `max` of all-missing
+    /// arguments is missing, so the maximum is the plain ordering maximum:
+    /// it is at least `k` when any argument is, at most `k` when every
+    /// argument is, and equals `k` when both an argument equals `k` and
+    /// every argument is at most `k`.
+    fn parse_max(&mut self) -> Option<Pred> {
+        let args = self.parse_call_args()?;
+        let (op, values) =
+            if self.peek(TokenType::KwIN) && self.peek_at(self.i + 1, TokenType::LPAREN) {
+                self.i += 2;
+                (Op::In, self.consume_literal_list_until_rparen())
+            } else {
+                let op = ty(self.t, self.i).and_then(cmp_op)?;
+                self.i += 1;
+                (op, vec![self.consume_literal()?])
+            };
+        if args.iter().any(|a| self.arrays.contains_key(a)) || values.is_empty() {
+            return None;
+        }
+        let mut each = |op: Op, v: &Value| -> Vec<Pred> {
+            args.iter()
+                .map(|a| self.atom(a.clone(), op, vec![v.clone()]))
+                .collect()
+        };
+        let mut equals =
+            |v: &Value| Pred::And(vec![Pred::Or(each(Op::Eq, v)), Pred::And(each(Op::Le, v))]);
+        Some(match op {
+            Op::Gt | Op::Ge => Pred::Or(each(op, &values[0])),
+            Op::Lt | Op::Le => Pred::And(each(op, &values[0])),
+            Op::Eq | Op::In => Pred::Or(values.iter().map(&mut equals).collect()),
+            Op::Ne => Pred::Not(Box::new(Pred::Or(values.iter().map(&mut equals).collect()))),
+        })
+    }
+
+    /// The identifiers passed to the call at the cursor, `name( a, b )`,
+    /// leaving the cursor after its `)`.
+    fn parse_call_args(&mut self) -> Option<Vec<String>> {
+        self.i += 2; // name (
         let mut args = Vec::new();
         let mut depth = 1;
         while self.i < self.t.len() {
@@ -2140,16 +2189,7 @@ impl<'a> PredicateParser<'a> {
             return None;
         }
         self.i += 1;
-
-        let op = ty(self.t, self.i).and_then(cmp_op)?;
-        self.i += 1;
-        let value = self.consume_literal().filter(Value::is_numeric)?;
-        self.used.extend(args.iter().cloned());
-        Some(Pred::Sum(SumAtom {
-            vars: args,
-            op,
-            value,
-        }))
+        Some(args)
     }
 
     /// `upcase(trim(IDENT))` style. Walk forward through nested `IDENT(`
@@ -2982,6 +3022,8 @@ fn negate(node: &Pred) -> Pred {
                 Op::Ge => with(Op::Lt),
             }
         }
+        // Not(true) is false.
+        Pred::And(c) if c.is_empty() => Pred::Or(Vec::new()),
         Pred::And(c) => {
             let mut alts: Vec<Pred> = c
                 .iter()
@@ -3351,6 +3393,72 @@ mod tests {
         );
         assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
         assert!(rows.iter().any(|r| r == &["0", "0"]), "{rows:?}");
+    }
+
+    #[test]
+    fn max_comparisons_are_any_and_every_argument() {
+        // Columns are a, b. Missing sorts below every number, so
+        // `max(a, b) = 1` needs one argument at 1 and neither above it.
+        let (rows, cov) = minimal_rows(
+            "if a in (0:9) and b in (0:9) then do;\n\
+               if max(a, b) ge 2 then x = 2;\n\
+               else if max(a, b) = 1 then x = 1;\n\
+               else x = 0;\n\
+             end;\n",
+        );
+        assert_eq!(cov.values, 3);
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        let max = |r: &Vec<String>| r.iter().filter_map(|c| c.parse::<i64>().ok()).max();
+        assert!(rows.iter().any(|r| max(r) == Some(1)), "{rows:?}");
+        assert!(rows.iter().any(|r| max(r) == Some(0)), "{rows:?}");
+    }
+
+    #[test]
+    fn constant_recodes_decide_conditions_on_them() {
+        // `h` is always 0: the guard on it holds, and `h = 2` never does,
+        // so `s = 1` comes down to `a = 1`.
+        let (rows, cov) = minimal_rows(
+            "h = 0;\n\
+             if a in (0, 1) and h in (0, 1) then do;\n\
+               if h = 2 or a = 1 then s = 1; else s = 0;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(
+            rows.iter().any(|r| r == &["0"]) && rows.iter().any(|r| r == &["1"]),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn definitions_in_else_arms_of_outer_blocks_are_exclusive() {
+        let atom = |var: &str, v: i64| {
+            Pred::Atom(Atom {
+                var: var.into(),
+                op: Op::Eq,
+                values: vec![Value::Int(v)],
+                is_array: false,
+            })
+        };
+        let def = |cond: Vec<Pred>| Def {
+            var: "x".into(),
+            value: DefValue::Const(Value::Int(1)),
+            cond,
+        };
+        // if a = 1 then do; if b = 1 then x = …; end;
+        // else if a = 2 then do; if c = 1 then x = …; end;
+        let defs = vec![
+            def(vec![atom("a", 1), atom("b", 1)]),
+            def(vec![
+                Pred::Not(Box::new(atom("a", 1))),
+                atom("a", 2),
+                atom("c", 1),
+            ]),
+            def(vec![atom("c", 1)]),
+        ];
+        assert!(exclusive(&defs, 0, 1));
+        assert!(!exclusive(&defs, 0, 2));
+        assert!(!exclusive(&defs, 1, 2));
     }
 
     #[test]
