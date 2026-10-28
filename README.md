@@ -164,7 +164,8 @@ everything else to `0`.
 
 Conditions are modelled as comparisons against literals in either order
 (`x > 3`, `0 < x`), chained ranges (`5 le x le 70`), `in` lists, `sum()`
-thresholds, comparisons between two variables (`dob < ref_date`) and
+thresholds, `max()` comparisons (`max(a, b) ge 2` holds when any argument
+does, as missing sorts below every number), comparisons between two variables (`dob < ref_date`) and
 `missing(x)`; a lone `.` is the missing value. A condition on a derived
 variable is rewritten into a condition on what decides it, when every
 assignment to the variable is a constant (`flag = 1;`, `flag = .;`), a copy
