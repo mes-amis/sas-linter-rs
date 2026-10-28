@@ -101,18 +101,28 @@ impl Rule for FormatForUnknownVariable {
         let mut external_input = false;
         let mut targets: Vec<(Token, FormatKind)> = Vec::new();
         let mut use_names: HashSet<String> = HashSet::new();
+        // PROC statements name the input dataset's variables, which the file
+        // needn't mention anywhere else. A PROC runs until the next step.
+        let mut in_proc = false;
 
         for stmt in iter_statements(tokens) {
             if stmt.is_empty() {
                 continue;
             }
             let opener = &stmt[0];
+            match opener.token_type {
+                TokenType::KwProc => in_proc = true,
+                TokenType::KwData => in_proc = false,
+                _ => {}
+            }
             if is_external_input(opener.token_type) {
                 external_input = true;
                 continue;
             }
             if let Some(kind) = FormatKind::from_type(opener.token_type) {
-                collect_targets(stmt, kind, &mut targets);
+                if !in_proc {
+                    collect_targets(stmt, kind, &mut targets);
+                }
                 continue;
             }
             if is_declaration_opener(opener) {

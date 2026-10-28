@@ -51,3 +51,20 @@ fn labels_are_skipped_when_the_step_reads_external_input() {
     let src = "data foo;\n set bar;\n label anything = 'x';\nrun;\n";
     assert!(findings(src).is_empty(), "{:?}", findings(src));
 }
+
+#[test]
+fn proc_steps_are_skipped() {
+    // PROC statements name variables of the input dataset (`data=foo`),
+    // which this file never mentions otherwise.
+    let src = "proc print data=foo label;\n\
+               label score = 'Score';\n\
+               format score best.;\n\
+               run;\n\
+               data bar;\n\
+               x = 1;\n\
+               label typo = 'T';\n\
+               run;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!(f[0].line, 7);
+}
