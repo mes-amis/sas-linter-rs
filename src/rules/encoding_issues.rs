@@ -7,8 +7,8 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Hook, Rule};
 use crate::token::TokenStream;
 
-use super::tab_expansion::literal_byte_ranges;
 use super::RuleMeta;
+use crate::token::literal_byte_ranges;
 
 pub struct EncodingIssues {
     use_defaults: bool,

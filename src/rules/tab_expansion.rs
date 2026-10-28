@@ -1,11 +1,7 @@
-use std::ops::Range;
-
-use sas_lexer::TokenType;
-
 use crate::config::{opt_bool, opt_i64};
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Hook, Rule};
-use crate::token::TokenStream;
+use crate::token::{in_ranges, literal_byte_ranges, TokenStream};
 
 use super::RuleMeta;
 
@@ -113,69 +109,4 @@ impl Rule for TabExpansion {
         }
         out
     }
-}
-
-/// Byte ranges of the tokenized source whose contents are data rather than
-/// layout: string literals (plain, typed like `'09'x`, and macro-resolving
-/// `"…&mv…"` expressions, any of which may span lines) and datalines card
-/// images. Whitespace and byte-rewriting rules must leave these bytes alone.
-/// Sorted and non-overlapping; an unterminated string runs to EOF.
-pub(crate) fn literal_byte_ranges(tokens: &TokenStream) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut expr_start: Option<usize> = None;
-    let mut depth = 0usize;
-    for t in &tokens.all {
-        let (start, end) = (t.start_byte as usize, t.end_byte as usize);
-        match t.token_type {
-            TokenType::StringLiteral
-            | TokenType::BitTestingLiteral
-            | TokenType::DateLiteral
-            | TokenType::DateTimeLiteral
-            | TokenType::NameLiteral
-            | TokenType::TimeLiteral
-            | TokenType::HexStringLiteral
-                if depth == 0 =>
-            {
-                ranges.push(start..end)
-            }
-            TokenType::StringExprStart => {
-                if depth == 0 {
-                    expr_start = Some(start);
-                }
-                depth += 1;
-            }
-            TokenType::StringExprEnd
-            | TokenType::BitTestingLiteralExprEnd
-            | TokenType::DateLiteralExprEnd
-            | TokenType::DateTimeLiteralExprEnd
-            | TokenType::NameLiteralExprEnd
-            | TokenType::TimeLiteralExprEnd
-            | TokenType::HexStringLiteralExprEnd => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    if let Some(s) = expr_start.take() {
-                        ranges.push(s..end);
-                    }
-                }
-            }
-            // Card images start on the line after `datalines;` — SAS
-            // ignores the rest of the statement's own line, so it stays
-            // layout.
-            TokenType::DatalinesData => {
-                let first_nl = t.text.find('\n').map_or(t.text.len(), |n| n + 1);
-                ranges.push(start + first_nl..end);
-            }
-            _ => {}
-        }
-    }
-    if let (Some(s), Some(last)) = (expr_start, tokens.all.last()) {
-        ranges.push(s..last.end_byte as usize);
-    }
-    ranges
-}
-
-/// Whether byte offset `pos` falls inside one of the sorted `ranges`.
-pub(crate) fn in_ranges(ranges: &[Range<usize>], pos: usize) -> bool {
-    let idx = ranges.partition_point(|r| r.end <= pos);
-    ranges.get(idx).is_some_and(|r| r.start <= pos)
 }

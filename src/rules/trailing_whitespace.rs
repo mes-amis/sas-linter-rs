@@ -5,8 +5,8 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::TokenStream;
 
-use super::tab_expansion::{in_ranges, literal_byte_ranges};
 use super::RuleMeta;
+use crate::token::{in_ranges, literal_byte_ranges};
 
 pub struct TrailingWhitespace {
     autofix: bool,
