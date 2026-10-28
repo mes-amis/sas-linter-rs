@@ -156,8 +156,21 @@ Exit codes: `0` clean, `1` findings, `2` invalid args.
 Walks each source's logical graph (array declarations, `VAR = VAR;`
 self-declarations, `if`-head predicates including nested `if … then do`
 guards) to find the input variables, builds a value set per input, and
-writes `--size` sampled rows (default 500) as CSV. Inputs whose values are
-all string literals (or `$` arrays) default to `""`; everything else to `0`.
+writes `--size` sampled rows (default 500) as CSV. A variable read on the
+right of an assignment and never assigned (`ht = raw_ht / 100;`) is an
+input too. Inputs whose values are all string literals (or `$` arrays), and
+inputs the catalog documents as `yyyymmdd` dates, default to `""`;
+everything else to `0`.
+
+Conditions are modelled as comparisons against literals in either order
+(`x > 3`, `0 < x`), chained ranges (`5 le x le 70`), `in` lists, `sum()`
+thresholds, comparisons between two variables (`dob < ref_date`) and
+`missing(x)`; a lone `.` is the missing value. A condition on a derived
+variable is rewritten into a condition on what decides it, when every
+assignment to the variable is a constant (`flag = 1;`, `flag = .;`), a copy
+(`xv = v;`) or a unit conversion (`m = (inches * 0.0254);`): `flag in (0,1)`
+becomes the conditions under which one of the assignments giving 0 or 1
+runs and no later assignment overrides it.
 
 Rows come from a weighted mix of strategies:
 
@@ -184,7 +197,10 @@ the first branch each one reaches in source order. Reachability follows
 statements. A condition inside an array `do` loop counts as covered when
 any iteration takes the branch. The set comes from a greedy set cover and
 is often, though not provably, the true minimum. Conditions the parser
-can't model (function calls, derived variables) are assumed to hold.
+can't model (function calls, variables computed by other arithmetic) are
+assumed to hold. A range bounded on both sides (`lo < x < hi`) is met with
+its midpoint rather than an edge, so rows stay sensible for arithmetic
+further on that the graph doesn't model (`bmi = wt / (ht * ht)`).
 
 `--minimal` also puts every input the catalog documents at its
 boundaries, which takes a few extra rows: the minimum and maximum
@@ -194,7 +210,7 @@ for integer specs. For decimal ranges it's the finest decimal place of
 the bounds, and at least 0.1. `0-3` therefore yields -1, 0, 3 and 4, and
 `0.5-40.0` yields 0.4, 0.5, 40.0 and 40.1. Boundary values are packed
 into rows that already exist wherever they don't change those rows'
-branch outcomes.
+branch outcomes and the cell wasn't deliberately put mid-range.
 
 Stdout reports `covers N/M branch outcomes`, plus the number of boundary
 values placed when the catalog documents any input. Stderr names each

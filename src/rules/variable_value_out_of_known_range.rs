@@ -199,6 +199,8 @@ fn value_allowed(spec: &Spec, lit: &Literal) -> bool {
     let int = lit.value as i64;
     match &spec.kind {
         SpecKind::Decimal(lo, hi) => lit.value >= *lo && lit.value <= *hi,
+        // Dates are text; a numeric literal says nothing about them.
+        SpecKind::Date => true,
         // Integer catalogs say nothing about fractional literals.
         _ if lit.value.fract() != 0.0 => true,
         SpecKind::Range(lo, hi) => int >= *lo && int <= *hi,
@@ -210,6 +212,7 @@ fn format_message(ident: &str, display: &str, spec: &Spec) -> String {
     let allowed_str = match &spec.kind {
         SpecKind::Range(lo, hi) => format!("{}..{}", lo, hi),
         SpecKind::Decimal(lo, hi) => format!("{}..{}", lo, hi),
+        SpecKind::Date => "yyyymmdd".to_string(),
         SpecKind::Set(values) => {
             let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
             format!("{{{}}}", parts.join(", "))

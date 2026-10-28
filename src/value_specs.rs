@@ -30,6 +30,8 @@ pub enum SpecKind {
     /// `lo-hi` with a decimal point on either end (`0.0-99.9`): any real
     /// value in the closed interval.
     Decimal(f64, f64),
+    /// `8 Characters: yyyymmdd` — a date held as eight characters.
+    Date,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +235,11 @@ static RE_RANGE_PAREN: Lazy<Regex> =
 static RE_RANGE_PLUS: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d+)-(\d+)\s*,\s*(.+)$").unwrap());
 
 pub fn parse_values(text: &str) -> Option<Spec> {
+    if text.to_ascii_lowercase().contains("yyyymmdd") {
+        return Some(Spec {
+            kind: SpecKind::Date,
+        });
+    }
     if let Some(c) = RE_RANGE.captures(text) {
         let lo: i64 = c[1].parse().ok()?;
         let hi: i64 = c[2].parse().ok()?;
@@ -304,6 +311,14 @@ mod tests {
         assert!(matches!(
             parse_values("0-2").map(|s| s.kind),
             Some(SpecKind::Range(0, 2))
+        ));
+    }
+
+    #[test]
+    fn parses_yyyymmdd_dates() {
+        assert!(matches!(
+            parse_values("8 Characters: yyyymmdd").map(|s| s.kind),
+            Some(SpecKind::Date)
         ));
     }
 
