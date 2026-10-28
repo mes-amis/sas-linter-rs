@@ -176,7 +176,8 @@ runs and no later assignment overrides it. A sum or difference of
 variables and constants (`n = 7 - (a + b);`, or of comparisons,
 `n = (a = 0) + (b = 0);`) is rewritten as a count over the values each
 variable's guard or catalog spec lists, and is missing when any variable
-is. A counter (`n = 0;` then
+is; `n = sum(a, b);` skips missing arguments and is missing only when all
+are. `x not in (…)` and `x not eq k` are the negated comparisons. A counter (`n = 0;` then
 `if c then n = n + 1;`, or `n = n + x` by a variable whose guard lists its
 values) is rewritten as a count of the steps whose conditions hold, so
 `n ge 2` becomes "at least two of those conditions". A declared input
