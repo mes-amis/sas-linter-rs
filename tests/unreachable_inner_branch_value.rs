@@ -220,6 +220,31 @@ fn a_guard_without_a_do_block_restricts_nothing() {
     assert!(findings(src).is_empty());
 }
 
+// ── Logical operators ────────────────────────────────────────────────────
+
+#[test]
+fn ampersand_is_and() {
+    let src = "if a in (1,2) & b in (0) then do;\n\
+               if a = 3 then x = 1;\n\
+               if c = 1 & b = 4 then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(2, 8), (3, 16)]);
+}
+
+#[test]
+fn bar_and_bang_are_or_but_concatenation_is_not() {
+    let src = "if a in (1,2) | b in (0) then do;\n\
+               if a = 3 then x = 1;\n\
+               end;\n\
+               if a in (1,2) ! b in (0) then do;\n\
+               if a = 3 then x = 1;\n\
+               end;\n\
+               if a in (1,2) and c = d || 'x' then do;\n\
+               if a = 3 then x = 1;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(8, 8)]);
+}
+
 // ── Literal values ───────────────────────────────────────────────────────
 
 #[test]

@@ -76,18 +76,17 @@ fn string_value(text: &str) -> String {
         .to_string()
 }
 
-/// Operators that make a condition a disjunction.
+/// Operators that join two tests with OR: `or`, `|`, `!` and the
+/// mainframe broken bar `¦`. (Doubled, `||` / `!!` / `¦¦` concatenate.)
 pub const DISJUNCTION_OPS: &[TokenType] = &[
     TokenType::KwOR,
     TokenType::PIPE,
-    TokenType::PIPE2,
     TokenType::EXCL,
-    TokenType::EXCL2,
-    TokenType::AMP,
+    TokenType::BPIPE,
 ];
 
-/// Operators that join two tests with AND.
-pub const CONJUNCTION_OPS: &[TokenType] = &[TokenType::KwAND];
+/// Operators that join two tests with AND: `and`, `&`.
+pub const CONJUNCTION_OPS: &[TokenType] = &[TokenType::KwAND, TokenType::AMP];
 
 /// Peel `( … )` pairs that enclose the entire slice.
 pub fn strip_outer_parens(mut toks: &[Token]) -> &[Token] {

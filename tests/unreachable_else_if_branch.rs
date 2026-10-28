@@ -245,6 +245,15 @@ fn opaque_conjuncts_only_match_themselves_exactly() {
 }
 
 #[test]
+fn ampersand_is_and_and_bar_is_or() {
+    let src = "if a = 1 & b = 2 then x = 1;\n\
+               else if b = 2 and a = 1 then x = 2;\n\
+               else if c = 1 | d = 2 then x = 3;\n\
+               else if c = 1 then x = 4;\n";
+    assert_eq!(positions(src), vec![(2, 6)]);
+}
+
+#[test]
 fn negations_are_opaque() {
     let src = "if not a = 1 then x = 1;\n\
                else if a ne 1 then x = 2;\n\
