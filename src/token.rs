@@ -1,7 +1,5 @@
-use std::collections::HashSet;
+use std::ops::Range;
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use sas_lexer::{lex_program, TokenChannel, TokenType};
 
 /// Flattened token record matching the shape the Ruby gem exposed via FFI.
@@ -39,16 +37,19 @@ pub struct TokenStream {
 }
 
 impl TokenStream {
+    /// Tokenize `source`, or an empty stream if the lexer refuses it (only a
+    /// source over 4 GiB). Rules re-tokenize their own output with this;
+    /// file entry points check with [`TokenStream::try_tokenize`] first so a
+    /// refused file is an error, not a clean result.
     pub fn tokenize(source: &str) -> Self {
-        let result = match lex_program(&source) {
-            Ok(r) => r,
-            Err(_) => {
-                return TokenStream {
-                    default: Vec::new(),
-                    all: Vec::new(),
-                };
-            }
-        };
+        Self::try_tokenize(source).unwrap_or(TokenStream {
+            default: Vec::new(),
+            all: Vec::new(),
+        })
+    }
+
+    pub fn try_tokenize(source: &str) -> Result<Self, sas_lexer::error::ErrorKind> {
+        let result = lex_program(&source)?;
 
         let buffer = &result.buffer;
         let mut all: Vec<Token> = Vec::with_capacity(buffer.token_count() as usize);
@@ -92,35 +93,79 @@ impl TokenStream {
             });
         }
 
-        // Lines like `**  text **;` are a project-level "visual comment"
-        // idiom. SAS itself terminates `*…;` at the first `;`, so prose with
-        // embedded `;` (e.g. revision dates `01/01/00;`) ends the comment
-        // early and the remainder of the line lexes as code. Treat any line
-        // that opens with `**` and closes with `**;` as a comment for
-        // analysis purposes, regardless of internal semicolons.
-        let visual_lines = visual_comment_lines(source);
-
         let default: Vec<Token> = all
             .iter()
             .filter(|t| !matches!(t.channel, TokenChannel::HIDDEN | TokenChannel::COMMENT))
-            .filter(|t| !visual_lines.contains(&t.start_line))
             .cloned()
             .collect();
 
-        TokenStream { default, all }
+        Ok(TokenStream { default, all })
     }
 }
 
-static VISUAL_COMMENT_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*\*\*.*\*\*;\s*$").unwrap());
-
-fn visual_comment_lines(source: &str) -> HashSet<u32> {
-    let mut set = HashSet::new();
-    for (idx, line) in source.lines().enumerate() {
-        if VISUAL_COMMENT_LINE.is_match(line) {
-            set.insert((idx + 1) as u32);
+/// Byte ranges of the tokenized source whose contents are data rather than
+/// layout: string literals (plain, typed like `'09'x`, and macro-resolving
+/// `"…&mv…"` expressions, any of which may span lines) and datalines card
+/// images. Whitespace and byte-rewriting rules must leave these bytes alone.
+/// Sorted and non-overlapping; an unterminated string runs to EOF.
+pub fn literal_byte_ranges(tokens: &TokenStream) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut expr_start: Option<usize> = None;
+    let mut depth = 0usize;
+    for t in &tokens.all {
+        let (start, end) = (t.start_byte as usize, t.end_byte as usize);
+        match t.token_type {
+            TokenType::StringLiteral
+            | TokenType::BitTestingLiteral
+            | TokenType::DateLiteral
+            | TokenType::DateTimeLiteral
+            | TokenType::NameLiteral
+            | TokenType::TimeLiteral
+            | TokenType::HexStringLiteral
+                if depth == 0 =>
+            {
+                ranges.push(start..end)
+            }
+            TokenType::StringExprStart => {
+                if depth == 0 {
+                    expr_start = Some(start);
+                }
+                depth += 1;
+            }
+            TokenType::StringExprEnd
+            | TokenType::BitTestingLiteralExprEnd
+            | TokenType::DateLiteralExprEnd
+            | TokenType::DateTimeLiteralExprEnd
+            | TokenType::NameLiteralExprEnd
+            | TokenType::TimeLiteralExprEnd
+            | TokenType::HexStringLiteralExprEnd => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(s) = expr_start.take() {
+                        ranges.push(s..end);
+                    }
+                }
+            }
+            // Card images start on the line after `datalines;` — SAS
+            // ignores the rest of the statement's own line, so it stays
+            // layout.
+            TokenType::DatalinesData => {
+                let first_nl = t.text.find('\n').map_or(t.text.len(), |n| n + 1);
+                ranges.push(start + first_nl..end);
+            }
+            _ => {}
         }
     }
-    set
+    if let (Some(s), Some(last)) = (expr_start, tokens.all.last()) {
+        ranges.push(s..last.end_byte as usize);
+    }
+    ranges
+}
+
+/// Whether byte offset `pos` falls inside one of the sorted `ranges`.
+pub fn in_ranges(ranges: &[Range<usize>], pos: usize) -> bool {
+    let idx = ranges.partition_point(|r| r.end <= pos);
+    ranges.get(idx).is_some_and(|r| r.start <= pos)
 }
 
 #[cfg(test)]
@@ -128,26 +173,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_visual_comment_lines() {
-        let src = "data foo;\n\
-                   **  REVISION DATES:   01/01/00; 02/02/01 **;\n\
-                   **  ALGORITHM: splits sample by A, then B **;\n\
-                   x = 1;\n\
-                   **A**; **B**;\n";
-        let lines = visual_comment_lines(src);
-        assert!(lines.contains(&2));
-        assert!(lines.contains(&3));
-        assert!(lines.contains(&5));
-        assert!(!lines.contains(&1));
-        assert!(!lines.contains(&4));
-    }
-
-    #[test]
-    fn ignores_partial_visual_comment_lines() {
-        let src = "** comment **; data foo;\n\
-                   **; trailing\n\
-                   * single-star comment;\n";
-        let lines = visual_comment_lines(src);
-        assert!(lines.is_empty());
+    fn code_after_a_semicolon_in_a_double_star_line_is_code() {
+        // SAS ends the comment at the first `;`; the rest of the line runs.
+        let src = "data foo;\n**  REVISION DATES:   01/01/00; 02/02/01 **;\nx = 1;\n";
+        let stream = TokenStream::tokenize(src);
+        assert!(
+            stream
+                .default
+                .iter()
+                .any(|t| t.start_line == 2 && t.text == "02"),
+            "{:?}",
+            stream.default
+        );
     }
 }

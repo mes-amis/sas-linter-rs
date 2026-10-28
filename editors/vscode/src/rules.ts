@@ -14,6 +14,9 @@ export const AUTOFIX_RULES: ReadonlyArray<string> = [
   "unterminated_comment",
   "inconsistent_variable_case",
   "malformed_label_statement",
+  "proc_statement_missing_semicolon",
+  "orphan_format_range",
+  "unescaped_quote_in_string",
 ];
 
 export function isAutofixable(ruleId: string): boolean {

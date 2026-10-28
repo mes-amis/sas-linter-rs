@@ -102,8 +102,22 @@ fn bodies_equivalent(a: &[Token], b: &[Token]) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).all(|(ta, tb)| {
-        ta.token_type == tb.token_type && ta.text.to_lowercase() == tb.text.to_lowercase()
+        ta.token_type == tb.token_type
+            && if case_sensitive(ta.token_type) {
+                ta.text == tb.text
+            } else {
+                ta.text.eq_ignore_ascii_case(&tb.text)
+            }
     })
+}
+
+/// Names and keywords are case-insensitive in SAS; the contents of a
+/// string literal (`'Yes'` vs `'YES'`) or macro text are not.
+fn case_sensitive(ty: TokenType) -> bool {
+    matches!(
+        ty,
+        TokenType::StringLiteral | TokenType::StringExprText | TokenType::MacroString
+    )
 }
 
 static RE_TIGHT_BEFORE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([,;()])").unwrap());

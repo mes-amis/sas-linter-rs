@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships ~19 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent, and on-by-default banner-comment + assignment alignment passes in `src/align.rs`), and a `synthesize` subcommand (`src/synthesize.rs`) that samples CSV input testdata from each source's `if`-predicate graph — a weighted strategy mix (`--weights`), or `--minimal`'s greedy 100%-branch-coverage row set. The acceptable-values catalog loader (`src/value_specs.rs`) is shared between `synthesize` and `variable_value_out_of_known_range`. Targets Rust 1.82+.
+Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships 27 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent, and on-by-default banner-comment + assignment alignment passes in `src/align.rs`), and a `synthesize` subcommand (`src/synthesize.rs`) that samples CSV input testdata from each source's `if`-predicate graph — a weighted strategy mix (`--weights`), or `--minimal`'s greedy 100%-branch-coverage row set. The acceptable-values catalog loader (`src/value_specs.rs`) is shared between `synthesize` and `variable_value_out_of_known_range`. Targets Rust 1.82+.
 
 ## Commands
 
@@ -38,6 +38,9 @@ Pipeline: **`Config`** (YAML, `src/config.rs`) → **`Linter`** (`src/linter.rs`
 2. Export a `pub fn meta() -> RuleMeta` exposing id, description, autofix capability, `default_factory`, and `config_factory` (the latter receives the rule's `serde_yaml::Value` options map).
 3. Register the module in `src/rules/mod.rs` and append `<rule>::meta()` to `all_metas()`. This is an **explicit list, not auto-registry** (deliberate divergence from the Ruby gem — costs one line per rule, buys a compile-time registry check).
 4. Add fixtures at `tests/fixtures/lints/<rule_id>/lint.sas` (must fire ≥1 finding) and `clean.sas` (must be silent). Wire the pair into the `PAIRS` table in `tests/fixtures_smoke.rs` — that parametric suite drives both halves. Several fixture dirs can target one rule id (e.g. `unreachable_inner` and `unreachable_inner_eq` both exercise `unreachable_inner_branch_value`).
+5. Document it in `README.md`: an entry in the `## YAML config` template and a row in the `## Built-in rules` table (`tests/readme_rules.rs` enforces both). An autofix rule also goes in `AUTOFIX_RULES` in `editors/vscode/src/rules.ts`.
+
+Retiring or merging a rule id: add it to `RETIRED_IDS` in `src/rules/mod.rs` so existing configs and `--rules` lists keep resolving.
 
 ### Config semantics (Ruby-parity contracts)
 
@@ -49,7 +52,13 @@ Pipeline: **`Config`** (YAML, `src/config.rs`) → **`Linter`** (`src/linter.rs`
 
 ### Autofix ordering
 
-Inside `lint_with_fixes`: all rules' `check` runs over the original source first (so findings reflect the pre-fix state); then autofix-enabled rules run **sequentially** over an accumulating string. Order is the rule order in `all_metas()`. If two autofixes interact, that order matters — keep it in mind when adding rewrite rules.
+Inside `lint_with_fixes`: all rules' `check` runs over the original source first (so findings reflect the pre-fix state); then autofix-enabled rules run **sequentially** over an accumulating string, in the order of `AUTOFIX_ORDER` (`src/rules/mod.rs`) — not config order. It is grouped in phases (bytes → comment boundaries → statement boundaries → names) so each fix sees the text earlier phases settled and one save reaches a fixed point; `tests/autofix_order.rs` requires every autofix rule to appear in it exactly once. Place a new rewrite rule in the phase whose output it depends on.
+
+### Report precedence
+
+After every rule's `check` runs, `REPORT_PRECEDENCE` (`src/rules/mod.rs`) drops a general rule's finding when a more specific rule reports the same line (e.g. `source_headers` explains the `statement_not_valid` / `malformed_if_condition` noise from header text running as code). It only applies while the specific rule is enabled, so a defect is never left unreported. Prefer adding a pair here over making one rule call into another.
+
+**`TokenStream.default` is what SAS runs.** There is no comment heuristic beyond the lexer's: text after a `;` inside a `** … **;` line is code, and rules see it.
 
 In `--format` mode (`Linter::format_source`) autofixes are split by `Rule::hook()`: `before_format` rules (default for `tab_expansion`, `line_endings`, `encoding_issues`) run before the formatter so its column math sees normalized bytes; everything else runs after. A per-rule `hook:` config key overrides the default (applied via the `HookOverride` wrapper in `src/rules/mod.rs`).
 

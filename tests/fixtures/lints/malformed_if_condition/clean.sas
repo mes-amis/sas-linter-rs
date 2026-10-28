@@ -13,11 +13,12 @@ if R1 = 1
    and R2 = 2
    then cOut = 13;
 
-** Regression cases for issue #1 — visual comments (** … **;) must not be
-   analysed as code, even when prose contains keywords or embedded ';' **;
-**  REVISION DATES:   01/01/00; 02/02/01 (fixed typo: ... or x = 1 then do;)  **;
+** Regression cases for issue #1 — keywords in visual comment prose are not
+   analysed as code. (A `;` inside the prose ends the comment, so that text
+   really is code; source_headers reports it — see tests/report_precedence.rs) **;
+**  REVISION DATES:   01/01/00, 02/02/01 (fixed typo: ... or x = 1 then do)  **;
 **  ALGORITHM: Decision tree splits sample by group A, then by group B.       **;
-**  Multi-line visual comment style — each line is its own **…**; statement   **;
+**  Multi-line visual comment style — each line is its own statement         **;
 **              by cognitive status (sCPS) and behavioral problems, then by other **;
 **VARIABLE ASSIGNMENTS**; **PUT YOUR VARIABLES ON THE RIGHT-HAND SIDE HERE**;
 

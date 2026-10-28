@@ -106,24 +106,123 @@ fn do_blocks_inside_select_branches_balance() {
 }
 
 #[test]
-fn proc_sql_select_puts_the_file_out_of_scope() {
-    // A SQL `select` opens no block but `case … end` closes one, so `end` no
-    // longer maps onto `do`. Stay silent rather than mis-report.
+fn proc_sql_select_does_not_silence_the_rest_of_the_file() {
+    // A SQL `select` opens no block. It used to switch the whole file off;
+    // the data-step `do` after the PROC must still be reported.
     let src = "proc sql;\n  select * from t;\nquit;\ndo;\n";
-    assert!(
-        findings(src).is_empty(),
-        "files with a non-data-step select are out of scope"
+    assert_eq!(positions(src), vec![(4, 1)]);
+}
+
+#[test]
+fn sql_case_expressions_consume_their_end() {
+    // `case … end` is SQL's only `end`, and it needn't end the statement:
+    // `end as z,` / `end)` / `end;` all close the `case`.
+    let src = "proc sql;\n  \
+                 update t set x = case when y = 1 then 2 else 3 end;\n  \
+                 create table u as\n    \
+                   select case when a then 1 else 0 end as z,\n           \
+                          sum(case b when 1 then 1 end) as n\n    \
+                   from t;\n\
+               quit;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
+#[test]
+fn unclosed_sql_case_is_reported() {
+    let src = "proc sql;\n  select case when a then 1 as z from t;\nquit;\n";
+    let f = findings(src);
+    assert_eq!(positions(src), vec![(2, 10)], "{:?}", f);
+    assert!(f[0].message.contains("`case`"), "{:?}", f[0]);
+}
+
+#[test]
+fn proc_template_define_and_edit_blocks_balance() {
+    let src = "proc template;\n  \
+                 define style styles.mine;\n    \
+                   parent = styles.default;\n    \
+                   class body / color = white;\n  \
+                 end;\n  \
+                 define table base.t;\n    \
+                   define column c;\n      header = 'C';\n    end;\n  \
+                 end;\n  \
+                 edit base.freq;\n  end;\n\
+               run;\n\
+               data a;\n  y = 1;\nend;\nrun;\n";
+    // Only the data step's stray `end` is real.
+    assert_eq!(positions(src), vec![(16, 1)], "{:?}", findings(src));
+}
+
+#[test]
+fn a_new_step_statement_terminates_a_run_less_data_step() {
+    // `data b;` (and `proc …;`) end the previous step just as `run;` does.
+    let src = "data a;\n  do;\n    x = 1;\ndata b;\n  y = 1;\nend;\nproc print;\nrun;\n";
+    assert_eq!(positions(src), vec![(2, 3), (6, 1)], "{:?}", findings(src));
+}
+
+#[test]
+fn run_group_procs_keep_their_context_across_run() {
+    // PROC DS2: `data` and `run;` occur inside the PROC; `method … end;` is a
+    // block. Nothing here is unbalanced.
+    let src = "proc ds2;\n\
+               data out;\n  \
+                 method run();\n    set x;\n    if a then do;\n      b = 1;\n    end;\n  end;\n\
+               enddata;\n\
+               run;\n\
+               quit;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
+#[test]
+fn programming_procs_are_checked_like_a_data_step() {
+    let balanced = "proc fcmp outlib=work.f.p;\n  \
+                      function f(x);\n    do i = 1 to 2;\n      x = x + i;\n    end;\n    \
+                      return(x);\n  endsub;\n\
+                    run;\n";
+    assert!(findings(balanced).is_empty(), "{:?}", findings(balanced));
+
+    let unclosed = "proc fcmp outlib=work.f.p;\n  \
+                      function f(x);\n    do i = 1 to 2;\n      x = x + i;\n    \
+                      return(x);\n  endsub;\n\
+                    run;\n";
+    assert_eq!(
+        positions(unclosed),
+        vec![(3, 5)],
+        "{:?}",
+        findings(unclosed)
     );
 }
 
 #[test]
-fn macro_do_puts_the_file_out_of_scope() {
-    // `%do` / `%end` are a separate nesting stack; don't mix the counters.
-    let src = "%do i = 1 %to 3;\n  y = 1;\n%end;\ndo;\n";
-    assert!(
-        findings(src).is_empty(),
-        "files using macro do-blocks are out of scope"
-    );
+fn procs_without_a_block_model_are_not_checked() {
+    // Embedded-language PROCs carry foreign `do` / `end` keywords.
+    let src = "proc lua;\nsubmit;\n  for i = 1, 3 do\n    print(i)\n  end\nendsubmit;\nrun;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
+#[test]
+fn balanced_macro_blocks_leave_the_file_in_scope() {
+    // `%do` / `%end` are their own stack. When each macro block is balanced
+    // in data-step terms, whether it's generated (or how often) can't change
+    // the data-step balance, so the rest of the file is still checked.
+    let src = "%do i = 1 %to 3;\n  if x then do;\n    y = 1;\n  end;\n%end;\ndo;\n";
+    assert_eq!(positions(src), vec![(6, 1)], "{:?}", findings(src));
+}
+
+#[test]
+fn macro_blocks_that_split_a_do_block_put_the_file_out_of_scope() {
+    // Each `%if` arm opens a `do` that a shared `end;` closes — fine at
+    // runtime, unbalanced at the token level. Stay silent.
+    let src = "%if &a %then %do;\n  if x then do;\n%end;\n%else %do;\n  if y then do;\n%end;\n  z = 1;\nend;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+
+    // Likewise a macro whose body opens a block its caller closes, and a
+    // block keyword generated by a single-statement `%then`.
+    for src in [
+        "%macro open;\n  do;\n%mend;\n",
+        "%if &a %then do;\n  y = 1;\nend;\nend;\n",
+    ] {
+        assert!(findings(src).is_empty(), "{src}: {:?}", findings(src));
+    }
 }
 
 #[test]

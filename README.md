@@ -8,12 +8,12 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.5.2**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.6.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
 **macOS (Apple Silicon)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.2/sas-lint-v0.5.2-aarch64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-aarch64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -21,7 +21,7 @@ sas-lint --version
 **macOS (Intel)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.2/sas-lint-v0.5.2-x86_64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-x86_64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -29,7 +29,7 @@ sas-lint --version
 **Linux (x86_64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.2/sas-lint-v0.5.2-x86_64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-x86_64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -37,7 +37,7 @@ sas-lint --version
 **Linux (arm64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.2/sas-lint-v0.5.2-aarch64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-aarch64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -47,7 +47,7 @@ sas-lint --version
 ```powershell
 $dir = "$env:LOCALAPPDATA\sas-lint"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.5.2/sas-lint-v0.5.2-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
 & "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
@@ -72,19 +72,19 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
-The current extension release is **vscode-v0.4.0** (also kept in step by `tests/release_versions.rs`).
+The current extension release is **vscode-v0.4.1** (also kept in step by `tests/release_versions.rs`).
 
 **macOS / Linux**
 
 ```sh
-curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.0/sas-linter-vscode-0.4.0.vsix
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.1/sas-linter-vscode-0.4.1.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.0/sas-linter-vscode-0.4.0.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.1/sas-linter-vscode-0.4.1.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
 code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 
@@ -257,13 +257,25 @@ rules:
     enabled: true
     autofix: false             # rule supports autofix; off by default
 
+  proc_statement_missing_semicolon:
+    enabled: true
+    autofix: false             # insert the `;` that closes the proc statement
+
   invalid_assignment_target:
     enabled: true
     autofix: false             # join the space-separated words with `_`
 
+  malformed_label_statement:
+    enabled: true
+    autofix: false             # insert the missing `=` / terminating `;`
+
+  unbalanced_do_block:
+    enabled: true              # report-only; skipped on files with %do or proc sql select
+
   unterminated_comment:
     enabled: true
-    autofix: false             # append `;` to `**…**` lines whose missing terminator eats the next line
+    autofix: false             # end the comment on its first line when the next line is the swallowed code
+                               # (replaces star_comment_swallows_code; that id is still accepted as an alias)
 
   inconsistent_variable_case:
     enabled: true
@@ -271,6 +283,20 @@ rules:
 
   format_for_unknown_variable:
     enabled: true              # skipped automatically when the file uses set/merge/update/infile/input
+
+  unescaped_quote_in_string:
+    enabled: true
+    autofix: false             # double the quote (`''`) so it stays in the string
+
+  orphan_format_range:
+    enabled: true
+    autofix: false             # remove the stray `;` that closed the value statement early
+
+  statement_not_valid:
+    enabled: true              # data steps and open code only; PROC bodies are skipped
+
+  undefined_format:
+    enabled: true              # skipped when the file has no proc format, or uses fmtsearch / %include
 
   invalid_numeric_literal:
     enabled: true              # reject INTEGER_LITERAL tokens the lexer accepts but SAS doesn't (`1f`, `1d2`, …)
@@ -310,7 +336,7 @@ rules:
 
   source_headers:
     enabled: true
-    autofix: false             # rewrap **…**; 90-char header rows when true
+    autofix: false             # re-wrap leaked header text as 90-char **…**; rows
 
   line_endings:
     enabled: true
@@ -319,7 +345,7 @@ rules:
   encoding_issues:
     enabled: true
     autofix: false
-    use_defaults: false        # apply built-in smart-quote / em-dash / Win-1252 map
+    use_defaults: false        # apply built-in smart-quote / dash / non-breaking-space map
     replacements:              # project-specific byte→ASCII rewrites (run BEFORE defaults)
       "—": "--"
 
@@ -377,28 +403,32 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 
 | rule id | description |
 |---|---|
-| `unreachable_inner_branch_value` | Outer `if VAR in (S) then do;` guards an inner branch that tests `VAR` against a value outside `S`. Every `VAR in (…)` / `VAR = N` conjunct of an `and` chain is checked, in nested `if`s and `else if` arms alike, and a compound guard (`if A in (…) and B in (…) then do;`) restricts each of its variables. Conditions with `or`, `not` or `ne` are left alone. |
+| `unreachable_inner_branch_value` | Outer `if VAR in (S) then do;` guards an inner branch that tests `VAR` against a value outside `S`. Every `VAR in (…)` / `VAR = N` conjunct of an `and` chain is checked, in nested `if`s and `else if` arms alike, and a compound guard (`if A in (…) and B in (…) then do;`) restricts each of its variables. Conditions with `or` (`|`, `!`), `not` or `ne` are left alone; `&` is `and`. String values compare as SAS compares them (quote style and trailing blanks ignored). A guard stops restricting a variable once the block may assign it (assignment, sum statement, `do` index, `input`, `call` argument, array element), and stops restricting every variable at `set` / `merge` / `update` / `modify`. |
 | `unreachable_else_if_branch` | An `else if` arm whose condition is already covered by an earlier arm of the same `if` / `else if` chain, so it can never fire. Catches exact repeats (conjunct order, `in (…)` order, case and whitespace ignored) and subsumption — a smaller `in` set, a narrower `lt`/`le`/`gt`/`ge` range, or a point value inside an earlier range, on the same variable. Arms with function calls, `or`, negation or arithmetic are only matched by an exact repeat; each nested chain is checked on its own. Report-only. |
-| `identical_if_else_branches` | `if COND then S; else S;` with identical bodies — almost always a copy-paste error. |
+| `identical_if_else_branches` | `if COND then S; else S;` with identical bodies — almost always a copy-paste error. Names and keywords compare case-insensitively; string literals compare exactly. |
 | `commented_out_guard` | SAS line-comment `* if ... then do;` pattern indicating a disabled outer validity guard. |
 | `choose_one_template` | `** CHOOSE ONE OF THE BELOW STATEMENTS;` banner indicating a broken-by-default source. |
-| `trailing_whitespace` | Trailing spaces/tabs at end of line. |
-| `tab_expansion` | Tab characters that should be spaces (configurable width). |
-| `source_headers` | Restore the `**...**;` 90-char header convention to broken sources. |
-| `line_endings` | Mixed or non-CRLF line terminators (configurable target). |
-| `encoding_issues` | Smart-quote / em-dash / Win-1252 byte sequences that confuse downstream tooling. |
-| `malformed_if_condition` | Empty conditions, missing operators, orphan `then`, unbalanced parens, etc. |
-| `missing_assignment_semicolon` | Assignment statements followed by an inline `**` comment but no terminating `;`. |
+| `trailing_whitespace` | Trailing spaces/tabs at end of line, outside multi-line string literals and datalines (whose blanks are data). |
+| `tab_expansion` | Tab characters that should be spaces (configurable width). Tabs inside string literals (a literal tab in `dlm="…"`) and datalines are data and are left alone. |
+| `source_headers` | Header text that leaks out of its `**` comment and runs as code — after a `;` inside the text (`** CHECKED BY: A; B **;` ends at the first `;`), or a continuation line missing its `**` — and header boxes whose missing `;` lets the comment swallow the code after it. Code that merely follows a comment on the same line is left alone. Autofix re-wraps the line as a 90-char `**  …  **;` row, turning `;` inside the text into `,`. |
+| `line_endings` | Broken line terminators: a doubled CR (`\r\r\n`) or a lone CR. Autofix collapses `\r\r\n` to `\r\n` and turns a lone `\r` into the file's dominant ending. |
+| `encoding_issues` | Smart-quote / em-dash / Win-1252 punctuation that confuses downstream tooling. Autofix keeps strings and `*` comments valid: a replacement that yields the enclosing string's quote is doubled (`'It''s'`). Possible Mac Roman mojibake (Ð Ò Ó Ô Õ, which are also real letters) is reported but never rewritten. |
+| `malformed_if_condition` | Empty conditions, missing operators, orphan `then`, unbalanced parens, etc. Understands PROC SQL `case when … then`, prefix comparisons (`=:`, `in:`) and special missing values (`.a`–`.z`, `._`). |
+| `missing_assignment_semicolon` | Assignment statements followed by an inline `**` or `*` comment but no terminating `;`, so the comment is parsed as part of the expression. Prose is recognised by two bare words side by side, which no expression contains (`x = x ** Some description;`); a single word after the marker stays ambiguous with a real operand (`radius ** two`) and is left alone. Autofix inserts the `;` before the marker. |
+| `proc_statement_missing_semicolon` | A `proc` statement with no `;` absorbs the statement after it as PROC options (`proc format value …` → `ERROR 22-322`). Checks `proc format` (`value` / `invalue` / `picture`), `sort` (`by`), `freq` (`tables`), `means` / `summary` (`var` / `class`) and `print` (`var`). Autofix inserts the `;`. |
 | `invalid_assignment_target` | Data-step assignment whose target is several space-separated words (`Predicted risk = ...`) — SAS variable names cannot contain spaces. Suggests the underscore-joined name; autofix applies it. |
-| `unterminated_comment` | A standalone `** … **` comment whose missing `;` lets the SAS lexer extend the comment into the next line of real code, silently swallowing it. Autofix appends the `;`. |
-| `star_comment_swallows_code` | A trailing `*` comment on a code line that isn't terminated on its own line (commonly ending in `:` — a typo for `;`). SAS runs the comment to the next `;`, silently disabling the following statement. |
-| `unbalanced_do_block` | `do` / `end` nesting that doesn't balance — each unclosed `do` is reported at its own line, plus any stray `end`. In SAS this is a hard compile error (`ERROR 117-185: There were N unclosed DO blocks.`) reported with no line number. Data-step `select` blocks consume an `end` too and are tracked; files containing `%do` macro blocks or a PROC SQL `select` are skipped rather than risk a false positive. Report-only by design — where a missing `end` belongs is a semantic decision. |
-| `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string. Autofix inserts the `=`. |
+| `unterminated_comment` | A `*` or `**` comment — full-line or trailing — with no `;` on its line (often a `:` or `.` typo, or a `** … **` box line missing its `;`). SAS runs the comment to the next `;`, silently swallowing the code in between. Fires only when a swallowed line is a SAS statement, so comments that merely wrap prose, header boxes and comments that run to end of file stay quiet. Severity error. Autofix ends the comment on its first line when the swallowed code is the very next line. Replaces `star_comment_swallows_code`, which is still accepted in configs and `--rules` as an alias. |
+| `unbalanced_do_block` | `do` / `end` nesting that doesn't balance — each unclosed `do` is reported at its own line, plus any stray `end`. In SAS this is a hard compile error (`ERROR 117-185: There were N unclosed DO blocks.`) reported with no line number. Data-step `select` blocks, PROC SQL `case … end`, PROC TEMPLATE `define` / `edit` and PROC DS2 `method` blocks consume an `end` too and are tracked; other PROCs aren't counted. A file goes silent only when a `%do` / `%macro` body leaves a block open or closes one it didn't open. Report-only by design — where a missing `end` belongs is a semantic decision. |
+| `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string, or a `label` statement is missing its `;` so a following statement keyword (`attrib`, `label`, `format`, `if`, `run`, …) is swallowed into it. Autofix inserts the `=` / `;`. |
 | `invalid_numeric_literal` | INTEGER_LITERAL tokens whose text isn't actually a valid SAS numeric literal (e.g. `1f`, `1d2`). |
-| `variable_value_out_of_known_range` | `if VAR = N` / `if VAR in (...)` literals fall outside the variable's documented acceptable values. Loads the catalog from one or more CSVs with configurable column names and column separator (`,`, `;`, tab). |
+| `variable_value_out_of_known_range` | `VAR = N` / `VAR in (...)` tests that stand alone as an `and` / `or` operand of an `if` condition (not inside arithmetic such as `y + VAR = 5`) use literals outside the variable's documented acceptable values. Loads the catalog from one or more CSVs with configurable column names and column separator (`,`, `;`, tab). |
 | `invalid_conventional_variable` | Identifier matches a configured naming convention regex but isn't in the catalog. Reports the closest Levenshtein matches as "did you mean?" hints. `allow_list` entries are matched literally; entries wrapped in `/.../` are matched as regexes. No-op until both `pattern` and `csv_paths` are configured. |
-| `inconsistent_variable_case` | Identifier appears with more than one casing in the same file (`myVar` vs `MyVar`). SAS treats both as the same variable; autofix rewrites every minority spelling to the most-common form. Skips proc-format definitions and `format.` / `lib.member` references. |
-| `format_for_unknown_variable` | `format` / `informat` / `attrib` statement assigns a format to a variable that's referenced nowhere else in the file — almost always a typo. Skipped on files that pull in columns via `set` / `merge` / `update` / `infile` / `input`. |
+| `inconsistent_variable_case` | Identifier appears with more than one casing in the same file (`myVar` vs `MyVar`). SAS treats both as the same variable; autofix rewrites every minority spelling to the most-common form. Only data-step variable positions count — dataset names, function / CALL names, statement labels, `format.` / `lib.member` references and PROC step bodies are skipped. |
+| `format_for_unknown_variable` | `format` / `informat` / `attrib` / `label` statement assigns a format or label to a variable that's referenced nowhere else in the file — almost always a typo. PROC steps are skipped (their statements name the input dataset's variables), as are files that pull in columns via `set` / `merge` / `update` / `modify` / `infile` / `input` (including `if … then set …`). Variable ranges (`x1-x3`, `a--c`) are understood. |
+| `unescaped_quote_in_string` | A quote inside a string that matches its delimiter (`'Children's …'`) ends the string early: SAS reads the rest as code, and the next quote opens a new string that can swallow `;`, `end;` and `run;`. Recognised by a word glued to the closing quote — typed literals (`'…'d`, `'…'n`, `'…'x`) and keywords (`'a'then`) are fine. Severity error. Autofix doubles the quote (`''`). |
+| `orphan_format_range` | Inside `proc format`, a statement that starts with a literal, range, `low` / `high` or `other` followed by `=`, right after a `value` / `invalue` / `picture` statement — a stray `;` closed the definition early and SAS fails with `ERROR 180-322`. Autofix removes that `;`. |
+| `statement_not_valid` | A statement in open code or a data step that doesn't start like any SAS statement — bare text (a filename line above the header), stray punctuation (`*/.`), a `*` comment cut short by an embedded `;`. Accepts keywords, assignments (`x =`, `a{i} =`, `'n'n =`), sum statements, labels, hash method calls and macro code. PROC bodies are skipped; `run;` ends a PROC except run-group PROCs (`datasets`, `reg`, `sql`, …), which end at `quit;`. SAS fails with `ERROR 180-322`. Report-only. |
+| `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.
 

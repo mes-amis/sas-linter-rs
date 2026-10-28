@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -9,7 +9,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
-use super::RuleMeta;
+use super::{statement_not_valid, unterminated_comment, RuleMeta};
 
 pub struct SourceHeaders {
     autofix: bool,
@@ -17,7 +17,7 @@ pub struct SourceHeaders {
 
 const ID: &str = "source_headers";
 const DESCRIPTION: &str =
-    "Header lines look like `**`-comments but lex as code; will be re-wrapped.";
+    "Header text that leaks out of its `**` comment and runs as code; will be re-wrapped.";
 
 const TARGET_WIDTH: usize = 90;
 const PAD_TO: usize = TARGET_WIDTH - 3; // leave 3 chars for trailing `**;`
@@ -51,33 +51,26 @@ impl Rule for SourceHeaders {
     }
 
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
-        let bad = broken_header_lines(ctx.source);
-        bad.into_iter()
-            .map(|line_idx| Finding {
+        broken_lines(ctx.source, &ctx.tokens.all)
+            .into_iter()
+            .map(|(line_idx, why)| Finding {
                 path: ctx.path.to_string(),
                 line: (line_idx + 1) as u32,
                 column: 1,
                 rule: ID,
-                message: if self.autofix {
-                    "broken header line (autofixed)".into()
-                } else {
-                    "broken header line".into()
-                },
+                message: why.message(),
                 severity: Severity::Warning,
             })
             .collect()
     }
 
     fn autofix(&self, source: &str) -> String {
-        // Step 0: expand tabs to 4 spaces (Word documents).
-        let mut text = source.replace('\t', "    ");
+        // Re-wrapping a line can change how the lines after it lex, so
+        // repeat until nothing is left to fix.
+        let mut text = source.to_string();
         for _ in 0..10 {
             let stream = TokenStream::tokenize(&text);
-            let skip = c_comment_lines(&stream.all);
-            let mut bad = broken_lines_for(&text, &stream.all, &skip);
-            for ln in asterisk_rows_missing_semi(&text, &skip) {
-                bad.insert(ln);
-            }
+            let bad = broken_lines(&text, &stream.all);
             if bad.is_empty() {
                 break;
             }
@@ -87,97 +80,112 @@ impl Rule for SourceHeaders {
     }
 }
 
-/// Public-style helper for the `check` side: bad header line indices
-/// without the iterative autofix loop.
-fn broken_header_lines(source: &str) -> Vec<usize> {
-    let stream = TokenStream::tokenize(source);
-    let skip = c_comment_lines(&stream.all);
-    let set = broken_lines_for(source, &stream.all, &skip);
-    let mut v: Vec<usize> = set.into_iter().collect();
-    v.sort();
-    v
+/// Why a header line needs re-wrapping.
+#[derive(Clone, Copy)]
+enum Broken {
+    /// Header text that SAS reads as code: after a `;` inside the text, or
+    /// a continuation line without its `**`.
+    Leaks,
+    /// A line of a header box with no `;`, so the box's comment runs on
+    /// and swallows the code after it.
+    Unterminated { code_line: u32 },
 }
 
-fn c_comment_lines(tokens: &[Token]) -> HashSet<usize> {
-    let mut set = HashSet::new();
-    for t in tokens {
-        if t.token_type != TokenType::CStyleComment {
-            continue;
-        }
-        for ln in
-            (t.start_line as usize).saturating_sub(1)..=(t.end_line as usize).saturating_sub(1)
-        {
-            set.insert(ln);
+impl Broken {
+    fn message(self) -> String {
+        match self {
+            Broken::Leaks => "header text leaks out of its `**` comment — SAS runs it as \
+                              code."
+                .into(),
+            Broken::Unterminated { code_line } => format!(
+                "header line has no `;`, so the header comment runs on and swallows \
+                 the code on line {}.",
+                code_line
+            ),
         }
     }
-    set
 }
 
-fn header_cutoff_line(tokens: &[Token], total_lines: usize) -> usize {
-    for t in tokens {
-        if matches!(t.token_type, TokenType::KwData | TokenType::KwProc) {
-            return (t.start_line as usize).saturating_sub(1);
-        }
-    }
-    total_lines
-}
-
-fn prose_only_line(tokens: &[Token], line_idx: usize) -> bool {
-    let mut saw_default = false;
-    for t in tokens {
-        if (t.start_line as usize).saturating_sub(1) != line_idx {
-            continue;
-        }
-        if t.channel != TokenChannel::DEFAULT {
-            continue;
-        }
-        saw_default = true;
-        if matches!(t.token_type, TokenType::SEMI | TokenType::ASSIGN) {
-            return false;
-        }
-    }
-    saw_default
-}
-
-fn broken_lines_for(text: &str, tokens: &[Token], skip: &HashSet<usize>) -> HashSet<usize> {
+/// 0-indexed header lines to re-wrap.
+fn broken_lines(text: &str, tokens: &[Token]) -> BTreeMap<usize, Broken> {
     let lines: Vec<&str> = text.split('\n').collect();
-    let cutoff = header_cutoff_line(tokens, lines.len());
-
-    let mut bad = HashSet::new();
-    let mut default_lines: HashSet<usize> = HashSet::new();
-    for t in tokens {
-        if t.channel == TokenChannel::DEFAULT && t.token_type == TokenType::Identifier {
-            default_lines.insert((t.start_line as usize).saturating_sub(1));
-        }
+    let mut bad = BTreeMap::new();
+    for i in leaked_lines(&lines, tokens) {
+        bad.insert(i, Broken::Leaks);
     }
-
-    for &i in &default_lines {
-        if skip.contains(&i) {
+    for s in unterminated_comment::swallows(tokens, text) {
+        let first = (s.comment.start_line - 1) as usize;
+        let code = (s.code_line - 1) as usize;
+        let rows: Vec<usize> = (first..code)
+            .filter(|&i| is_header_shaped(lines[i]))
+            .collect();
+        // One unterminated line is `unterminated_comment`'s; a box is ours.
+        if rows.len() < 2 {
             continue;
         }
-        let Some(line) = lines.get(i) else { continue };
-        if line.trim_start().starts_with("**") {
-            // Properly terminated `**...**;` — don't re-pad; upstream
-            // problem belongs to a different finding.
-            if line.trim_end().ends_with("**;") {
-                continue;
-            }
-            bad.insert(i);
-        } else if i < cutoff {
-            let prev = nearest_nonblank(&lines, i as isize, -1);
-            let nxt = nearest_nonblank(&lines, i as isize, 1);
-            let both_marker = prev
-                .map(|s| s.trim_start().starts_with("**"))
-                .unwrap_or(false)
-                && nxt
-                    .map(|s| s.trim_start().starts_with("**"))
-                    .unwrap_or(false);
-            if both_marker && prose_only_line(tokens, i) {
-                bad.insert(i);
+        for i in rows {
+            if !lines[i].trim_end().ends_with(';') {
+                bad.entry(i).or_insert(Broken::Unterminated {
+                    code_line: s.code_line,
+                });
             }
         }
     }
     bad
+}
+
+/// A `**` text line or a row of stars.
+fn is_header_shaped(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("**") || RE_ALL_STARS.is_match(t)
+}
+
+/// Lines where code begins that is header text, not a statement: the code
+/// starts a statement (the code before it ended with `;`), doesn't start
+/// like any SAS statement, and sits on a `**` line or between `**` lines
+/// of the header.
+fn leaked_lines(lines: &[&str], tokens: &[Token]) -> Vec<usize> {
+    let code: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| t.channel == TokenChannel::DEFAULT && t.token_type != TokenType::EOF)
+        .collect();
+    let cutoff = code
+        .iter()
+        .find(|t| matches!(t.token_type, TokenType::KwData | TokenType::KwProc))
+        .map_or(lines.len(), |t| (t.start_line - 1) as usize);
+
+    let mut out = Vec::new();
+    for (k, t) in code.iter().enumerate() {
+        let prev = k.checked_sub(1).map(|p| code[p]);
+        let starts_statement = prev.is_none_or(|p| p.token_type == TokenType::SEMI);
+        let first_on_line = prev.is_none_or(|p| p.start_line != t.start_line);
+        if !starts_statement || !first_on_line {
+            continue;
+        }
+        let i = (t.start_line - 1) as usize;
+        let stmt: Vec<Token> = code[k..]
+            .iter()
+            .take_while(|c| c.token_type != TokenType::SEMI)
+            .map(|c| (*c).clone())
+            .collect();
+        // An empty statement (`;;`) is valid.
+        if stmt.is_empty()
+            || stmt.iter().any(statement_not_valid::is_macro)
+            || statement_not_valid::starts_validly(&stmt)
+        {
+            continue;
+        }
+        let Some(line) = lines.get(i) else { continue };
+        let in_header_box = i < cutoff
+            && nearest_nonblank(lines, i as isize, -1)
+                .is_some_and(|l| l.trim_start().starts_with("**"))
+            && nearest_nonblank(lines, i as isize, 1)
+                .is_some_and(|l| l.trim_start().starts_with("**"));
+        if line.trim_start().starts_with("**") || in_header_box {
+            out.push(i);
+        }
+    }
+    out
 }
 
 fn nearest_nonblank<'a>(lines: &'a [&'a str], from: isize, step: isize) -> Option<&'a str> {
@@ -194,27 +202,11 @@ fn nearest_nonblank<'a>(lines: &'a [&'a str], from: isize, step: isize) -> Optio
 
 static RE_ALL_STARS: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\*+$").unwrap());
 
-fn asterisk_rows_missing_semi(text: &str, skip: &HashSet<usize>) -> HashSet<usize> {
-    let mut bad = HashSet::new();
-    for (i, line) in text.split('\n').enumerate() {
-        if skip.contains(&i) {
-            continue;
-        }
-        let trimmed = line.trim();
-        if RE_ALL_STARS.is_match(trimmed) && !line.trim_end().ends_with(';') {
-            bad.insert(i);
-        }
-    }
-    bad
-}
-
-fn rewrite(text: &str, bad: &HashSet<usize>) -> String {
+fn rewrite(text: &str, bad: &BTreeMap<usize, Broken>) -> String {
     let mut out = Vec::new();
     for (i, line) in text.split('\n').enumerate() {
-        if bad.contains(&i) {
-            for rewritten in rewrite_line(line) {
-                out.push(rewritten);
-            }
+        if bad.contains_key(&i) {
+            out.extend(rewrite_line(line));
         } else {
             out.push(line.to_string());
         }
@@ -224,10 +216,18 @@ fn rewrite(text: &str, bad: &HashSet<usize>) -> String {
 
 static RE_SPLIT_MARKERS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+\*\*\s+").unwrap());
 
+/// Re-wrap one header line as `**  text  …  **;` padded to the header
+/// width. A `*` comment ends at its first `;`, so `;` inside the text
+/// becomes `,`.
 fn rewrite_line(line: &str) -> Vec<String> {
-    let stripped = line.trim_end();
+    let (line, cr) = match line.strip_suffix('\r') {
+        Some(body) => (body, "\r"),
+        None => (line, ""),
+    };
+    let expanded = line.replace('\t', "    ");
+    let stripped = expanded.trim_end();
     if RE_ALL_STARS.is_match(stripped) {
-        return vec![format!("{};", stripped)];
+        return vec![format!("{};{}", stripped, cr)];
     }
 
     // Continuation line missing `**` prefix.
@@ -245,6 +245,7 @@ fn rewrite_line(line: &str) -> Vec<String> {
         prefixed.clone()
     };
 
+    let trimmed = trimmed.replace(';', ",");
     let segments: Vec<&str> = RE_SPLIT_MARKERS.split(&trimmed).collect();
     segments
         .iter()
@@ -266,7 +267,7 @@ fn rewrite_line(line: &str) -> Vec<String> {
             } else {
                 body
             };
-            format!("{}**;", padded)
+            format!("{}**;{}", padded, cr)
         })
         .collect()
 }

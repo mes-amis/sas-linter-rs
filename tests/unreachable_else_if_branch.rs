@@ -190,6 +190,25 @@ fn string_and_numeric_values_are_distinct() {
     assert_eq!(positions(src), vec![(3, 6)]);
 }
 
+#[test]
+fn string_values_compare_as_sas_compares_them() {
+    // Quote style, doubled quotes and trailing blanks don't change a value;
+    // case does.
+    let src = "if c in ('A ', \"it's\") then x = 1;\n\
+               else if c = \"A\" then x = 2;\n\
+               else if c = 'it''s' then x = 3;\n\
+               else if c = 'a' then x = 4;\n";
+    assert_eq!(positions(src), vec![(2, 6), (3, 6)]);
+}
+
+#[test]
+fn prefix_comparisons_are_not_equality_tests() {
+    // `=:` is "begins with", so `c = 'A'` doesn't cover it.
+    let src = "if c = 'A' then x = 1;\n\
+               else if c =: 'A' then x = 2;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
 // ── Opaque arms ──────────────────────────────────────────────────────────
 
 #[test]
@@ -223,6 +242,15 @@ fn opaque_conjuncts_only_match_themselves_exactly() {
     let src = "if a in (1,2) or b = 1 then x = 1;\n\
                else if a in (1) or b = 1 then x = 2;\n";
     assert!(findings(src).is_empty());
+}
+
+#[test]
+fn ampersand_is_and_and_bar_is_or() {
+    let src = "if a = 1 & b = 2 then x = 1;\n\
+               else if b = 2 and a = 1 then x = 2;\n\
+               else if c = 1 | d = 2 then x = 3;\n\
+               else if c = 1 then x = 4;\n";
+    assert_eq!(positions(src), vec![(2, 6)]);
 }
 
 #[test]

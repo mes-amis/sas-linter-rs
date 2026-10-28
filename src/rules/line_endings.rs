@@ -49,8 +49,8 @@ impl Rule for LineEndings {
     ///   2. Lone `\r` — old-Mac line endings. SAS Viya treats the entire
     ///      file as one logical line, breaking saspy submission.
     ///
-    /// Walk bytes manually so column math stays right when the source
-    /// contains multi-byte UTF-8 sequences before a problem CR.
+    /// Walk bytes manually; columns are 1-based character columns, so a
+    /// multi-byte UTF-8 sequence before a problem CR counts once.
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
         let bytes = ctx.source.as_bytes();
         let mut findings = Vec::new();
@@ -80,7 +80,11 @@ impl Rule for LineEndings {
                 col = 1;
                 i += 1;
             } else {
-                col += 1;
+                // UTF-8 continuation bytes belong to the character already
+                // counted, so columns stay character columns.
+                if !(0x80..0xC0).contains(&b) {
+                    col += 1;
+                }
                 i += 1;
             }
         }

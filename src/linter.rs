@@ -54,15 +54,31 @@ impl Linter {
         for rule in &self.rules {
             findings.extend(rule.check(&ctx));
         }
+        let findings = apply_report_precedence(findings);
 
         let mut modified = source.to_string();
-        for rule in &self.rules {
-            if rule.autofix_enabled() && rule.supports_autofix() {
-                modified = rule.autofix(&modified);
-            }
+        for rule in self.fixers(|_| true) {
+            modified = rule.autofix(&modified);
         }
 
         (findings, modified)
+    }
+
+    /// Autofix-enabled rules accepted by `filter`, in `AUTOFIX_ORDER`.
+    fn fixers(&self, filter: impl Fn(&dyn Rule) -> bool) -> Vec<&dyn Rule> {
+        let mut fixers: Vec<&dyn Rule> = self
+            .rules
+            .iter()
+            .map(|r| r.as_ref())
+            .filter(|r| r.autofix_enabled() && r.supports_autofix() && filter(*r))
+            .collect();
+        fixers.sort_by_key(|r| {
+            rules::AUTOFIX_ORDER
+                .iter()
+                .position(|id| *id == r.id())
+                .unwrap_or(usize::MAX)
+        });
+        fixers
     }
 
     /// Lint a file by path. Sources are commonly Win-1252 / Latin-1 rather
@@ -71,6 +87,7 @@ impl Linter {
     /// rule produced a byte-different output.
     pub fn lint_file(&self, path: &Path) -> Result<Vec<Finding>> {
         let original = encoding::read_source(path)?;
+        ensure_lexable(path, &original)?;
         let (findings, modified) = self.lint_with_fixes(&original, &path.display().to_string());
         if modified.as_bytes() != original.as_bytes() {
             std::fs::write(path, modified.as_bytes())?;
@@ -89,14 +106,12 @@ impl Linter {
         self.apply_autofixes(&modified, Hook::AfterFormat)
     }
 
-    /// Run autofix-enabled rules attached to `hook`, sequentially in rule
-    /// order.
+    /// Run autofix-enabled rules attached to `hook`, sequentially in
+    /// `AUTOFIX_ORDER`.
     fn apply_autofixes(&self, source: &str, hook: Hook) -> String {
         let mut modified = source.to_string();
-        for rule in &self.rules {
-            if rule.autofix_enabled() && rule.supports_autofix() && rule.hook() == hook {
-                modified = rule.autofix(&modified);
-            }
+        for rule in self.fixers(|r| r.hook() == hook) {
+            modified = rule.autofix(&modified);
         }
         modified
     }
@@ -109,6 +124,7 @@ impl Linter {
         formatter: &crate::formatter::Formatter,
     ) -> Result<bool> {
         let original = encoding::read_source(path)?;
+        ensure_lexable(path, &original)?;
         let modified = self.format_source(&original, formatter);
         if modified.as_bytes() == original.as_bytes() {
             return Ok(false);
@@ -116,4 +132,29 @@ impl Linter {
         std::fs::write(path, modified.as_bytes())?;
         Ok(true)
     }
+}
+
+/// A source the lexer refuses would otherwise lint as clean.
+fn ensure_lexable(path: &Path, source: &str) -> Result<()> {
+    TokenStream::try_tokenize(source)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{}: cannot tokenize: {:?}", path.display(), e))
+}
+
+/// Drop findings that a more specific rule's finding on the same line
+/// explains (`rules::REPORT_PRECEDENCE`).
+fn apply_report_precedence(findings: Vec<Finding>) -> Vec<Finding> {
+    let explained: std::collections::HashSet<(&'static str, u32)> = findings
+        .iter()
+        .flat_map(|f| {
+            rules::REPORT_PRECEDENCE
+                .iter()
+                .filter(move |(winner, _)| *winner == f.rule)
+                .flat_map(move |(_, losers)| losers.iter().map(move |l| (*l, f.line)))
+        })
+        .collect();
+    findings
+        .into_iter()
+        .filter(|f| !explained.contains(&(f.rule, f.line)))
+        .collect()
 }

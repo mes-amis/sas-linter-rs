@@ -129,6 +129,39 @@ fn distinguishes_a_dead_value_from_a_dead_branch() {
     );
 }
 
+#[test]
+fn quotes_an_equality_guard_as_written() {
+    let src = "data out;\n\
+               set in;\n\
+               if x = 4 then do;\n\
+               if y in (0,1) then z=1;\n\
+               else if x = 5 then z=2;\n\
+               end;\n\
+               run;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!(
+        f[0].message,
+        "value 5 for x is excluded by the enclosing `if x = 4` guard at line 3; \
+         this branch is unreachable."
+    );
+}
+
+#[test]
+fn quotes_the_matching_conjunct_of_a_compound_guard() {
+    let src = "if a in (0) and b in (1, 2) then do;\n\
+               if b = 5 then x = 1;\n\
+               end;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert!(
+        f[0].message
+            .contains("enclosing `if b in (1, 2)` guard at line 1"),
+        "{}",
+        f[0].message
+    );
+}
+
 // ── What must stay silent ────────────────────────────────────────────────
 
 #[test]
@@ -180,11 +213,189 @@ fn the_guard_is_released_at_its_end() {
     assert!(findings(src).is_empty());
 }
 
+// ── Guards and writes to the guarded variable ────────────────────────────
+
+/// Wrap `body` in a `g in (1,2)` guard, follow it with a test of `g = 11`
+/// and a still-dead `h = 9`, and return the lines reported.
+fn lines_after_write(body: &str) -> Vec<u32> {
+    let src = format!(
+        "array arr{{2}} g k;\n\
+         if g in (1,2) and h in (0) then do;\n\
+         {body}\n\
+         if g = 11 then x = 1;\n\
+         if h = 9 then x = 2;\n\
+         end;\n"
+    );
+    findings(&src).iter().map(|f| f.line).collect()
+}
+
+#[test]
+fn a_write_to_the_variable_releases_its_guard() {
+    for body in [
+        "g = g + 10;",
+        "if z = 1 then g = 11;",
+        "if z = 1 then do; g = 11; end;",
+        "g + 9;",
+        "do g = 1 to 20; end;",
+        "input g 3.;",
+        "call missing(g);",
+        "arr{2} = 11;",
+        "arr(i) = 11;",
+    ] {
+        assert_eq!(lines_after_write(body), vec![5], "{body}");
+    }
+}
+
+#[test]
+fn a_write_to_another_variable_keeps_the_guard() {
+    for body in [
+        "x = g + 10;",
+        "k + 1;",
+        "call missing(k);",
+        "if g = 2 then k = 11;",
+    ] {
+        assert_eq!(lines_after_write(body), vec![4, 5], "{body}");
+    }
+}
+
+#[test]
+fn reading_a_data_set_releases_every_guard() {
+    for body in ["set more;", "merge a b;", "unknown{1} = 11;"] {
+        assert_eq!(lines_after_write(body), Vec::<u32>::new(), "{body}");
+    }
+}
+
+#[test]
+fn tests_before_the_write_are_still_checked() {
+    let src = "if g in (1,2) then do;\n\
+               if g = 3 then x = 1;\n\
+               g = 3;\n\
+               if g = 3 then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(2, 8)]);
+}
+
+// ── Block nesting ────────────────────────────────────────────────────────
+
+#[test]
+fn a_select_block_inside_a_guard_does_not_end_it() {
+    let src = "if g in (1,2) then do;\n\
+               select (k);\n\
+               when (1) x = 1;\n\
+               otherwise x = 2;\n\
+               end;\n\
+               select;\n\
+               when (k = 2) x = 3;\n\
+               end;\n\
+               if g = 3 then x = 4;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(9, 8)]);
+}
+
+#[test]
+fn an_end_option_is_not_a_block_end() {
+    let src = "if g in (1,2) then do;\n\
+               infile src end = done;\n\
+               if g = 3 then x = 1;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 8)]);
+}
+
+#[test]
+fn an_sql_select_does_not_open_a_block() {
+    // Were `select (a) …;` a block, the guard's `end;` would close it and
+    // the guard would leak past its own block.
+    let src = "proc sql;\n\
+               select (a) from t;\n\
+               quit;\n\
+               data u; set t;\n\
+               if g in (1,2) then do;\n\
+               end;\n\
+               if g = 3 then x = 2;\n\
+               run;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
 #[test]
 fn a_guard_without_a_do_block_restricts_nothing() {
     let src = "if e in (0,1,2) then x = 1;\n\
                if e in (5) then x = 2;\n";
     assert!(findings(src).is_empty());
+}
+
+// ── Logical operators ────────────────────────────────────────────────────
+
+#[test]
+fn ampersand_is_and() {
+    let src = "if a in (1,2) & b in (0) then do;\n\
+               if a = 3 then x = 1;\n\
+               if c = 1 & b = 4 then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(2, 8), (3, 16)]);
+}
+
+#[test]
+fn bar_and_bang_are_or_but_concatenation_is_not() {
+    let src = "if a in (1,2) | b in (0) then do;\n\
+               if a = 3 then x = 1;\n\
+               end;\n\
+               if a in (1,2) ! b in (0) then do;\n\
+               if a = 3 then x = 1;\n\
+               end;\n\
+               if a in (1,2) and c = d || 'x' then do;\n\
+               if a = 3 then x = 1;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(8, 8)]);
+}
+
+// ── Literal values ───────────────────────────────────────────────────────
+
+#[test]
+fn quote_style_does_not_change_a_string_value() {
+    let src = "if c in ('A','B') then do;\n\
+               if c = \"A\" then x = 1;\n\
+               if c = \"C\" then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 8)]);
+}
+
+#[test]
+fn trailing_blanks_do_not_change_a_string_value() {
+    // SAS pads the shorter operand with blanks before comparing.
+    let src = "if c in ('A ', 'B') then do;\n\
+               if c = 'A' then x = 1;\n\
+               if c in ('B  ', 'a') then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 17)]);
+}
+
+#[test]
+fn doubled_quotes_are_one_quote() {
+    let src = "if c in ('it''s') then do;\n\
+               if c = \"it's\" then x = 1;\n\
+               end;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
+#[test]
+fn missing_values_are_values() {
+    // Each special missing is its own value: `.a = .` is false.
+    let src = "if e in (., .A, 1) then do;\n\
+               if e in (., .a) then x = 1;\n\
+               if e = .b then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 8)]);
+}
+
+#[test]
+fn negative_and_exponent_literals_are_values() {
+    let src = "if e in (-1, 1e2) then do;\n\
+               if e in (-1, 100) then x = 1;\n\
+               if e = -2 then x = 2;\n\
+               end;\n";
+    let f = findings(src);
+    assert_eq!(positions(src), vec![(3, 8)]);
+    assert!(f[0].message.contains("value -2 for e"), "{}", f[0].message);
 }
 
 #[test]

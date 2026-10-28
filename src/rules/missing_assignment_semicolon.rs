@@ -4,15 +4,17 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
-use super::RuleMeta;
+use super::sas::FORMAT_DEFINITIONS;
+use super::{statement_not_valid, RuleMeta};
 
 pub struct MissingAssignmentSemicolon {
     autofix: bool,
 }
 
 const ID: &str = "missing_assignment_semicolon";
-const DESCRIPTION: &str = "Assignment missing terminating `;` — the inline \
-                            `**` comment marker was lexed as exponentiation.";
+const DESCRIPTION: &str = "Assignment (or other statement) missing its terminating \
+                            `;` — the `**` / `*` comment after it was lexed as an \
+                            operator.";
 
 pub fn meta() -> RuleMeta {
     RuleMeta {
@@ -43,100 +45,139 @@ impl Rule for MissingAssignmentSemicolon {
     }
 
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        let lines: Vec<&str> = ctx.source.split('\n').collect();
-        for (t, prev, next) in star2_offenders(&ctx.tokens.default, &lines) {
-            findings.push(Finding {
-                path: ctx.path.to_string(),
-                line: t.start_line,
-                column: t.start_column + 1,
-                rule: ID,
-                message: format!(
-                    "`**` parsed as exponentiation in `{} ** {}` — looks like a \
-                     missing `;` before an inline `** ... ;` comment.",
-                    prev.text, next.text
-                ),
-                severity: Severity::Warning,
-            });
-        }
-        findings
+        offenders(&ctx.tokens.default)
+            .into_iter()
+            .map(|(t, prev, next)| {
+                let (op, reads_as) = if t.token_type == TokenType::STAR2 {
+                    ("**", "exponentiation")
+                } else {
+                    ("*", "multiplication")
+                };
+                Finding {
+                    path: ctx.path.to_string(),
+                    line: t.start_line,
+                    column: t.start_column + 1,
+                    rule: ID,
+                    message: format!(
+                        "`{op}` parsed as {reads_as} in `{} {op} {} …` — looks like a \
+                         missing `;` before an inline `{op} ... ;` comment.",
+                        prev.text, next.text
+                    ),
+                    severity: Severity::Warning,
+                }
+            })
+            .collect()
     }
 
+    /// Terminate each offending assignment straight after the operand that
+    /// precedes its `*` / `**`, turning the rest into a comment statement.
+    /// Where two or more blanks precede the marker, the `;` takes one of
+    /// them so the comment keeps its column.
     fn autofix(&self, source: &str) -> String {
-        if source.is_empty() {
-            return source.to_string();
-        }
         let stream = TokenStream::tokenize(source);
-        let mut lines: Vec<String> = source.split('\n').map(|s| s.to_string()).collect();
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let mut edits: Vec<(usize, u32)> = star2_offenders(&stream.default, &line_refs)
+        let mut ends: Vec<usize> = offenders(&stream.default)
             .into_iter()
-            .map(|(_, prev, _)| {
-                (
-                    (prev.start_line as usize).saturating_sub(1),
-                    prev.end_column,
-                )
-            })
+            .map(|(_, prev, _)| prev.end_byte as usize)
             .collect();
-        // Apply within a line right-to-left.
-        edits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-
-        for (line_idx, col) in edits {
-            let Some(line) = lines.get_mut(line_idx) else {
-                continue;
-            };
-            let chars: Vec<char> = line.chars().collect();
-            let col = col as usize;
-            if col > chars.len() {
-                continue;
-            }
-            let before: String = chars[..col].iter().collect();
-            let after: String = chars[col..].iter().collect();
-            // Patterns from Ruby:
-            //   two+ spaces between IDENT and `**`: consume one for `;`
-            //   exactly one space: keep it after the `;`
-            //   no space: inject `; `
-            let replacement = if let Some(rest) = after.strip_prefix("  ") {
-                format!("; {}", rest)
-            } else if let Some(rest) = after.strip_prefix(' ') {
-                format!("; {}", rest)
-            } else {
-                format!("; {}", after)
-            };
-            *line = format!("{}{}", before, replacement);
+        ends.sort_unstable_by(|a, b| b.cmp(a));
+        let mut out = source.to_string();
+        for end in ends {
+            let spare_blank = out[end..].starts_with("  ");
+            out.replace_range(end..end + usize::from(spare_blank), ";");
         }
-        lines.join("\n")
+        out
     }
 }
 
-fn star2_offenders<'a>(
-    tokens: &'a [Token],
-    lines: &[&str],
-) -> Vec<(&'a Token, &'a Token, &'a Token)> {
+/// Words that act as operators inside an expression. `in` only does when
+/// a `(` list follows it.
+const OPERATOR_WORDS: &[&str] = &[
+    "and", "or", "not", "eq", "ne", "lt", "le", "gt", "ge", "min", "max",
+];
+
+/// An identifier-shaped token at `tokens[i]` that isn't acting as an
+/// operator — an operand, or a word of comment prose.
+fn is_bare_word(tokens: &[Token], i: usize) -> bool {
+    let t = &tokens[i];
+    let mut chars = t.text.chars();
+    let word_shaped = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let lower = t.text.to_ascii_lowercase();
+    let operator = OPERATOR_WORDS.contains(&lower.as_str())
+        || (lower == "in" && tokens.get(i + 1).map(|n| n.token_type) == Some(TokenType::LPAREN));
+    word_shaped && !operator
+}
+
+/// Whether `tokens[i]` is the first token on its line.
+fn begins_line(tokens: &[Token], i: usize) -> bool {
+    i > 0 && tokens[i - 1].end_line < tokens[i].start_line
+}
+
+/// Whether the statement holding `tokens[i]` is an assignment — `VAR = …`
+/// at the start of a statement or right after `then` / `else`.
+fn in_assignment(tokens: &[Token], i: usize) -> bool {
+    let start = tokens[..i]
+        .iter()
+        .rposition(|t| t.token_type == TokenType::SEMI)
+        .map_or(0, |p| p + 1);
+    (start..i).any(|k| {
+        tokens[k].token_type == TokenType::ASSIGN
+            && k > start
+            && tokens[k - 1].token_type == TokenType::Identifier
+            && (k - 1 == start
+                || matches!(
+                    tokens[k - 2].token_type,
+                    TokenType::KwThen | TokenType::KwElse
+                ))
+    })
+}
+
+/// `*` / `**` markers that start comment prose, one per statement: in an
+/// assignment, or at the start of a line inside a recognisable statement
+/// whose `;` is missing (a `** … **;` banner swallowed by the `value`
+/// statement above it). Mid-line outside an assignment, words can follow
+/// `*` legitimately (`tables a * b c;`). A statement that is prose from its
+/// first word is leaked header text, which `source_headers` reports.
+fn offenders(tokens: &[Token]) -> Vec<(&Token, &Token, &Token)> {
     let mut out = Vec::new();
-    for (i, t) in tokens.iter().enumerate() {
-        if t.token_type != TokenType::STAR2 {
-            continue;
+    let mut stmt_start = 0;
+    let mut marker: Option<usize> = None;
+    let mut reported = false;
+    for k in 0..tokens.len() {
+        match tokens[k].token_type {
+            TokenType::SEMI => {
+                stmt_start = k + 1;
+                marker = None;
+                reported = false;
+                continue;
+            }
+            TokenType::STAR | TokenType::STAR2 if k > 0 => marker = Some(k),
+            _ => {}
         }
-        let Some(line) = lines.get((t.start_line as usize).saturating_sub(1)) else {
+        let Some(m) = marker else {
             continue;
         };
-        if line.trim_start().starts_with("**") {
-            continue;
+        if !reported
+            && k > m
+            && k + 1 < tokens.len()
+            && is_bare_word(tokens, k)
+            && is_bare_word(tokens, k + 1)
+            && (in_assignment(tokens, m)
+                || (begins_line(tokens, m) && is_real_statement(&tokens[stmt_start..m])))
+        {
+            out.push((&tokens[m], &tokens[m - 1], &tokens[m + 1]));
+            reported = true;
         }
-        let (Some(prev), Some(next)) = (
-            i.checked_sub(1).and_then(|p| tokens.get(p)),
-            tokens.get(i + 1),
-        ) else {
-            continue;
-        };
-        if prev.token_type != TokenType::Identifier {
-            continue;
-        }
-        if next.token_type != TokenType::Identifier {
-            continue;
-        }
-        out.push((t, prev, next));
     }
     out
+}
+
+/// A statement that starts like SAS code: a data-step or global statement,
+/// or a PROC FORMAT definition.
+fn is_real_statement(stmt: &[Token]) -> bool {
+    stmt.first()
+        .is_some_and(|first| FORMAT_DEFINITIONS.contains(&first.text.to_lowercase().as_str()))
+        || (!stmt.is_empty() && statement_not_valid::starts_validly(stmt))
 }

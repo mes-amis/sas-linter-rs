@@ -1,6 +1,7 @@
 use crate::config::{opt_bool, opt_i64};
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Hook, Rule};
+use crate::token::{in_ranges, literal_byte_ranges, TokenStream};
 
 use super::RuleMeta;
 
@@ -54,65 +55,57 @@ impl Rule for TabExpansion {
         Hook::BeforeFormat
     }
 
-    /// One finding per tab character. Column is the 1-based character
-    /// column of the tab in the original source (no expansion math applied).
+    /// One finding per tab character outside string literals and datalines.
+    /// Column is the 1-based character column of the tab in the original
+    /// source (no expansion math applied).
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
+        let literals = literal_byte_ranges(ctx.tokens);
         let mut findings = Vec::new();
-        for (idx, raw_line) in ctx.source.split_inclusive('\n').enumerate() {
-            let body = raw_line.trim_end_matches('\n').trim_end_matches('\r');
-            if !body.contains('\t') {
+        let mut line: u32 = 1;
+        let mut col: u32 = 1;
+        for (i, ch) in ctx.source.char_indices() {
+            if ch == '\n' {
+                line += 1;
+                col = 1;
                 continue;
             }
-            for (col, ch) in body.chars().enumerate() {
-                if ch == '\t' {
-                    let msg = if self.autofix {
-                        format!("tab character (expanded to {}-space tab stop)", self.width)
-                    } else {
-                        "tab character".to_string()
-                    };
-                    findings.push(Finding {
-                        path: ctx.path.to_string(),
-                        line: (idx + 1) as u32,
-                        column: (col + 1) as u32,
-                        rule: ID,
-                        message: msg,
-                        severity: Severity::Warning,
-                    });
-                }
+            if ch == '\t' && !in_ranges(&literals, i) {
+                let msg = if self.autofix {
+                    format!("tab character (expanded to {}-space tab stop)", self.width)
+                } else {
+                    "tab character".to_string()
+                };
+                findings.push(Finding {
+                    path: ctx.path.to_string(),
+                    line,
+                    column: col,
+                    rule: ID,
+                    message: msg,
+                    severity: Severity::Warning,
+                });
             }
+            col += 1;
         }
         findings
     }
 
-    /// Each tab expands to `width - (out.len() % width)` spaces — standard
-    /// `expand(1)` semantics so column-aligned content stays aligned.
+    /// Each tab expands to `width - (column % width)` spaces — standard
+    /// `expand(1)` semantics so column-aligned content stays aligned. Tabs
+    /// inside string literals and datalines are data, not layout, and are
+    /// kept (they still occupy one column for the tab stops after them).
     fn autofix(&self, source: &str) -> String {
+        let literals = literal_byte_ranges(&TokenStream::tokenize(source));
         let mut out = String::with_capacity(source.len());
-        for raw_line in source.split_inclusive('\n') {
-            let mut term = "";
-            let body = if let Some(rest) = raw_line.strip_suffix("\r\n") {
-                term = "\r\n";
-                rest
-            } else if let Some(rest) = raw_line.strip_suffix('\n') {
-                term = "\n";
-                rest
-            } else {
-                raw_line
-            };
-
-            let mut line_out = String::with_capacity(body.len());
-            for ch in body.chars() {
-                if ch == '\t' {
-                    let pad = self.width - (line_out.chars().count() % self.width);
-                    for _ in 0..pad {
-                        line_out.push(' ');
-                    }
-                } else {
-                    line_out.push(ch);
-                }
+        let mut col = 0usize;
+        for (i, ch) in source.char_indices() {
+            if ch == '\t' && !in_ranges(&literals, i) {
+                let pad = self.width - (col % self.width);
+                out.extend(std::iter::repeat_n(' ', pad));
+                col += pad;
+                continue;
             }
-            out.push_str(&line_out);
-            out.push_str(term);
+            out.push(ch);
+            col = if ch == '\n' { 0 } else { col + 1 };
         }
         out
     }

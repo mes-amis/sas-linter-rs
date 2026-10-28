@@ -1364,7 +1364,7 @@ impl Walker<'_> {
                 }
             }
             match tokens[i].token_type {
-                TokenType::KwIf => {
+                TokenType::KwIf if starts_statement(tokens, i) => {
                     let in_else = arm.is_some();
                     let here = arm.take().unwrap_or_else(|| reach.clone());
                     let j = if_head_end(tokens, i + 1);
@@ -1437,6 +1437,17 @@ impl Walker<'_> {
 }
 
 /// Index of the depth-0 `;` ending the statement that starts at `start`.
+/// Whether `tokens[i]` opens a statement: first in the file, or after `;`,
+/// `then`, `else` or a statement label's `:`. An `if` anywhere else (prose
+/// after a `;` inside a `** … **;` comment) isn't an `if` statement.
+fn starts_statement(tokens: &[Token], i: usize) -> bool {
+    i == 0
+        || matches!(
+            tokens[i - 1].token_type,
+            TokenType::SEMI | TokenType::KwThen | TokenType::KwElse | TokenType::COLON
+        )
+}
+
 fn statement_end(tokens: &[Token], start: usize) -> usize {
     let mut depth = 0i32;
     let mut j = start;
@@ -2810,6 +2821,32 @@ mod tests {
 
     fn graph(src: &str) -> Graph {
         build_graph(src, &ValueSpecs::default())
+    }
+
+    #[test]
+    fn an_if_inside_another_statement_is_not_a_branch() {
+        // Header prose after a `;` runs as one (failing) statement; the
+        // `if` in it is not an `if` statement.
+        let g = graph(
+            "data out; set in;\n\
+             **  in the last 90 days; it can only record if 2 or more occurred in the last 30 days **;\n\
+             if score ge 3 then risk = 1;\n\
+             lbl: if flag = 1 then risk = 2;\n\
+             run;\n",
+        );
+        let without = graph(
+            "data out; set in;\n\
+             if score ge 3 then risk = 1;\n\
+             lbl: if flag = 1 then risk = 2;\n\
+             run;\n",
+        );
+        assert_eq!(g.inputs, without.inputs);
+        assert_eq!(g.branches.len(), without.branches.len());
+        assert_eq!(g.predicates.len(), without.predicates.len());
+        // A subsetting `if` would restrict every branch after it.
+        let reaches: Vec<usize> = g.branches.iter().map(|b| b.reach.len()).collect();
+        let reaches_without: Vec<usize> = without.branches.iter().map(|b| b.reach.len()).collect();
+        assert_eq!(reaches, reaches_without);
     }
 
     #[test]
