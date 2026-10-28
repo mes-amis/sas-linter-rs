@@ -87,6 +87,19 @@ fn a_multi_word_assignment_target_in_open_code_is_flagged() {
 }
 
 #[test]
+fn only_statement_keywords_start_a_statement() {
+    // `from`, `as`, `then` are keywords, but no statement starts with them.
+    let src = "data foo;\nfrom the table;\nas noted above;\nthen stop;\nrun;\n";
+    assert_eq!(positions(src), vec![(2, 1), (3, 1), (4, 1)]);
+}
+
+#[test]
+fn only_numbered_statements_take_a_digit_suffix() {
+    let src = "title2 'x';\nfootnote10 'y';\ndata foo;\nx1 y z;\nretain2 q;\nrun;\n";
+    assert_eq!(positions(src), vec![(4, 1), (5, 1)]);
+}
+
+#[test]
 fn statements_with_macro_code_are_not_checked() {
     let src = "data foo;\n&var = 1;\n%if &x %then %do; y = 1; %end;\nrun;\n";
     assert!(findings(src).is_empty(), "{:?}", findings(src));

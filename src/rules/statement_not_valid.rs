@@ -27,10 +27,9 @@ pub fn meta() -> RuleMeta {
 }
 
 /// Statement names the lexer emits as plain identifiers rather than `Kw*`
-/// tokens. Numbered forms (`title2`, `symbol1`, …) match on their prefix.
+/// tokens.
 const STATEMENT_WORDS: &[&str] = &[
     "abort",
-    "axis",
     "catname",
     "cards",
     "continue",
@@ -42,13 +41,11 @@ const STATEMENT_WORDS: &[&str] = &[
     "endsas",
     "error",
     "file",
-    "footnote",
     "go",
     "goptions",
     "goto",
     "infile",
     "leave",
-    "legend",
     "lines",
     "link",
     "lock",
@@ -58,7 +55,6 @@ const STATEMENT_WORDS: &[&str] = &[
     "options",
     "otherwise",
     "page",
-    "pattern",
     "putlog",
     "remove",
     "replace",
@@ -70,12 +66,56 @@ const STATEMENT_WORDS: &[&str] = &[
     "signoff",
     "signon",
     "skip",
-    "symbol",
     "systask",
-    "title",
     "waitfor",
     "window",
     "x",
+];
+
+/// Statements that also take a number suffix: `title2`, `symbol1`, ….
+const NUMBERED_STATEMENT_WORDS: &[&str] =
+    &["axis", "footnote", "legend", "pattern", "symbol", "title"];
+
+/// Keyword tokens a data-step or global statement can start with. The
+/// lexer also has keyword types for SQL and option words (`from`, `as`,
+/// `then`, …) that never start one.
+const STATEMENT_KEYWORDS: &[TokenType] = &[
+    TokenType::KwArray,
+    TokenType::KwAttrib,
+    TokenType::KwBy,
+    TokenType::KwCall,
+    TokenType::KwData,
+    TokenType::KwDeclare,
+    TokenType::KwDelete,
+    TokenType::KwDo,
+    TokenType::KwDrop,
+    TokenType::KwElse,
+    TokenType::KwEnd,
+    TokenType::KwFilename,
+    TokenType::KwFormat,
+    TokenType::KwIf,
+    TokenType::KwInfile,
+    TokenType::KwInformat,
+    TokenType::KwInput,
+    TokenType::KwKeep,
+    TokenType::KwLabel,
+    TokenType::KwLength,
+    TokenType::KwLibname,
+    TokenType::KwList,
+    TokenType::KwMerge,
+    TokenType::KwMissing,
+    TokenType::KwOutput,
+    TokenType::KwProc,
+    TokenType::KwPut,
+    TokenType::KwQuit,
+    TokenType::KwRename,
+    TokenType::KwRun,
+    TokenType::KwSelect,
+    TokenType::KwSet,
+    TokenType::KwStop,
+    TokenType::KwUpdate,
+    TokenType::KwWhen,
+    TokenType::KwWhere,
 ];
 
 /// PROCs that keep accepting statements after `run;` until `quit;`.
@@ -173,8 +213,7 @@ fn starts_validly(stmt: &[Token]) -> bool {
     let first = &stmt[0];
     let next = stmt.get(1).map(|t| t.token_type);
     match first.token_type {
-        // Every type after `Identifier` is a keyword.
-        ty if ty > TokenType::Identifier => true,
+        ty if STATEMENT_KEYWORDS.contains(&ty) => true,
         TokenType::DatalinesStart | TokenType::DatalinesData => true,
         TokenType::NameLiteral => next == Some(TokenType::ASSIGN),
         TokenType::Identifier => {
@@ -202,11 +241,12 @@ fn starts_validly(stmt: &[Token]) -> bool {
 }
 
 fn is_statement_word(text: &str) -> bool {
-    let word = text
-        .to_lowercase()
-        .trim_end_matches(|c: char| c.is_ascii_digit())
-        .to_string();
-    STATEMENT_WORDS.contains(&word.as_str())
+    let word = text.to_lowercase();
+    if STATEMENT_WORDS.contains(&word.as_str()) {
+        return true;
+    }
+    let base = word.trim_end_matches(|c: char| c.is_ascii_digit());
+    NUMBERED_STATEMENT_WORDS.contains(&base)
 }
 
 /// The statement's text on its first line, shortened for the message.
