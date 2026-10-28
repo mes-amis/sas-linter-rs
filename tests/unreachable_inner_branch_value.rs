@@ -129,6 +129,39 @@ fn distinguishes_a_dead_value_from_a_dead_branch() {
     );
 }
 
+#[test]
+fn quotes_an_equality_guard_as_written() {
+    let src = "data out;\n\
+               set in;\n\
+               if x = 4 then do;\n\
+               if y in (0,1) then z=1;\n\
+               else if x = 5 then z=2;\n\
+               end;\n\
+               run;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!(
+        f[0].message,
+        "value 5 for x is excluded by the enclosing `if x = 4` guard at line 3; \
+         this branch is unreachable."
+    );
+}
+
+#[test]
+fn quotes_the_matching_conjunct_of_a_compound_guard() {
+    let src = "if a in (0) and b in (1, 2) then do;\n\
+               if b = 5 then x = 1;\n\
+               end;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert!(
+        f[0].message
+            .contains("enclosing `if b in (1, 2)` guard at line 1"),
+        "{}",
+        f[0].message
+    );
+}
+
 // ── What must stay silent ────────────────────────────────────────────────
 
 #[test]

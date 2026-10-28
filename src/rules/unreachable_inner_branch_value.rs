@@ -46,6 +46,8 @@ struct GuardFrame {
     allowed: HashSet<LitKey>,
     depth: i32,
     line: u32,
+    /// The guard's test as written (`x = 4`, `e in (0,1,2)`), for messages.
+    text: String,
 }
 
 impl Rule for UnreachableInnerBranchValue {
@@ -68,7 +70,7 @@ impl Rule for UnreachableInnerBranchValue {
             match tok.token_type {
                 TokenType::KwIf => {
                     let (consumed, frames, inner) =
-                        analyze_if(tokens, i, do_depth, &stack, ctx.path);
+                        analyze_if(tokens, i, do_depth, &stack, ctx.path, ctx.source);
                     findings.extend(inner);
                     // Frames take effect inside the `do;` that follows the
                     // `then`; the `do` itself is left for the arm below.
@@ -123,6 +125,8 @@ struct Comparison {
     var: String,
     display: String,
     values: Vec<LitValue>,
+    /// Source text of the whole test.
+    text: String,
 }
 
 /// Analyse the `if` at `i`. Returns how many tokens to skip (the condition,
@@ -135,6 +139,7 @@ fn analyze_if(
     do_depth: i32,
     stack: &[GuardFrame],
     path: &str,
+    source: &str,
 ) -> (usize, Vec<GuardFrame>, Vec<Finding>) {
     let Some(then_idx) = find_then(tokens, i + 1) else {
         return (1, vec![], vec![]);
@@ -145,7 +150,7 @@ fn analyze_if(
 
     let mut findings = Vec::new();
     let mut frames = Vec::new();
-    for cmp in conjunct_comparisons(cond) {
+    for cmp in conjunct_comparisons(cond, source) {
         if let Some(frame) = stack.iter().rev().find(|f| f.var == cmp.var) {
             let dead: Vec<&LitValue> = cmp
                 .values
@@ -168,8 +173,8 @@ fn analyze_if(
                     rule: ID,
                     message: format!(
                         "value {} for {} is excluded by the enclosing \
-                         `if {} in (...)` guard at line {}; {}",
-                        val.display, cmp.display, cmp.display, frame.line, verdict
+                         `if {}` guard at line {}; {}",
+                        val.display, cmp.display, frame.text, frame.line, verdict
                     ),
                     severity: Severity::Warning,
                 });
@@ -181,6 +186,7 @@ fn analyze_if(
                 allowed: cmp.values.iter().map(|v| v.key.clone()).collect(),
                 depth: do_depth + 1,
                 line: tokens[i].start_line,
+                text: cmp.text,
             });
         }
     }
@@ -200,7 +206,7 @@ fn find_then(tokens: &[Token], i: usize) -> Option<usize> {
 /// The `VAR in (…)` / `VAR = lit` tests in a condition, one per top-level
 /// `and` conjunct. Conjuncts of any other shape (`not`, `ne`, ranges,
 /// function calls, …) are skipped; a top-level disjunction yields nothing.
-fn conjunct_comparisons(cond: &[Token]) -> Vec<Comparison> {
+fn conjunct_comparisons(cond: &[Token], source: &str) -> Vec<Comparison> {
     let cond = strip_outer_parens(cond);
     let mut parts: Vec<&[Token]> = Vec::new();
     let mut depth = 0usize;
@@ -234,6 +240,10 @@ fn conjunct_comparisons(cond: &[Token]) -> Vec<Comparison> {
                 var: ident.text.to_lowercase(),
                 display: ident.text.clone(),
                 values,
+                text: source
+                    .get(ident.start_byte as usize..part[end - 1].end_byte as usize)
+                    .unwrap_or_default()
+                    .to_string(),
             })
         })
         .collect()
