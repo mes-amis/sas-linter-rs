@@ -241,6 +241,10 @@ rules:
     enabled: true
     autofix: false             # rule supports autofix; off by default
 
+  proc_statement_missing_semicolon:
+    enabled: true
+    autofix: false             # insert the `;` that closes the proc statement
+
   invalid_assignment_target:
     enabled: true
     autofix: false             # join the space-separated words with `_`
@@ -373,6 +377,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `encoding_issues` | Smart-quote / em-dash / Win-1252 byte sequences that confuse downstream tooling. |
 | `malformed_if_condition` | Empty conditions, missing operators, orphan `then`, unbalanced parens, etc. |
 | `missing_assignment_semicolon` | Assignment statements followed by an inline `**` or `*` comment but no terminating `;` (a `*` counts when two bare words follow it, e.g. `x = x * Some description;`). Autofix inserts the `;`. |
+| `proc_statement_missing_semicolon` | A `proc` statement with no `;` absorbs the statement after it as PROC options (`proc format value …` → `ERROR 22-322`). Checks `proc format` (`value` / `invalue` / `picture`), `sort` (`by`), `freq` (`tables`), `means` / `summary` (`var` / `class`) and `print` (`var`). Autofix inserts the `;`. |
 | `invalid_assignment_target` | Data-step assignment whose target is several space-separated words (`Predicted risk = ...`) — SAS variable names cannot contain spaces. Suggests the underscore-joined name; autofix applies it. |
 | `unterminated_comment` | A standalone `** … **` comment whose missing `;` lets the SAS lexer extend the comment into the next line of real code, silently swallowing it. Autofix appends the `;`. |
 | `star_comment_swallows_code` | A trailing `*` comment on a code line that isn't terminated on its own line (commonly ending in `:` — a typo for `;`). SAS runs the comment to the next `;`, silently disabling the following statement. |

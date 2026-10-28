@@ -54,6 +54,10 @@ const PAIRS: &[(&str, &str)] = &[
     ("source_headers", "source_headers"),
     ("unbalanced_do_block", "unbalanced_do_block"),
     ("unbalanced_do_block", "unbalanced_do_block_stray_end"),
+    (
+        "proc_statement_missing_semicolon",
+        "proc_statement_missing_semicolon",
+    ),
     ("unreachable_else_if_branch", "unreachable_else_if_branch"),
     (
         "unreachable_else_if_branch",
