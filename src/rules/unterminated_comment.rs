@@ -2,16 +2,17 @@ use sas_lexer::{TokenChannel, TokenType};
 
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
-use crate::token::TokenStream;
+use crate::token::{Token, TokenStream};
 
-use super::RuleMeta;
+use super::{statement_not_valid, RuleMeta};
 
 pub struct UnterminatedComment {
     autofix: bool,
 }
 
 const ID: &str = "unterminated_comment";
-const DESCRIPTION: &str = "`**` comment missing its terminating `;` — consumes following code.";
+const DESCRIPTION: &str = "`*` / `**` comment with no `;` on its line runs on and \
+                            swallows the code that follows, up to the next `;`.";
 
 pub fn meta() -> RuleMeta {
     RuleMeta {
@@ -34,6 +35,10 @@ impl Rule for UnterminatedComment {
     fn description(&self) -> &'static str {
         DESCRIPTION
     }
+    fn severity(&self) -> Severity {
+        // It silently disables code.
+        Severity::Error
+    }
     fn supports_autofix(&self) -> bool {
         true
     }
@@ -42,84 +47,119 @@ impl Rule for UnterminatedComment {
     }
 
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
-        let lines: Vec<&str> = split_keep_empty(ctx.source);
-        bad_line_indices(&ctx.tokens.all, &lines)
+        swallows(&ctx.tokens.all, ctx.source)
             .into_iter()
-            .map(|i| {
-                let line = lines[i];
-                let indent = line.len() - line.trim_start().len();
-                Finding {
-                    path: ctx.path.to_string(),
-                    line: (i + 1) as u32,
-                    column: (indent + 1) as u32,
-                    rule: ID,
-                    message:
-                        "`**` comment missing `;` — consumes the next line of code as comment text."
-                            .into(),
-                    severity: Severity::Warning,
-                }
+            .map(|s| Finding {
+                path: ctx.path.to_string(),
+                line: s.comment.start_line,
+                column: s.comment.start_column + 1,
+                rule: ID,
+                message: format!(
+                    "`{}` comment has no `;` on its line, so it runs on and swallows \
+                     the code on line {} — SAS never executes it. End the comment \
+                     with `;`.",
+                    if s.comment.text.starts_with("**") {
+                        "**"
+                    } else {
+                        "*"
+                    },
+                    s.code_line
+                ),
+                severity: Severity::Error,
             })
             .collect()
     }
 
     fn autofix(&self, source: &str) -> String {
-        if source.is_empty() {
-            return source.to_string();
-        }
         let stream = TokenStream::tokenize(source);
-        let lines: Vec<&str> = split_keep_empty(source);
-        let bad = bad_line_indices(&stream.all, &lines);
-        if bad.is_empty() {
-            return source.to_string();
+        let mut edits: Vec<(usize, usize)> = swallows(&stream.all, source)
+            .into_iter()
+            .filter(|s| s.fixable)
+            .map(|s| s.first_line_blank_tail)
+            .collect();
+        edits.sort_unstable_by(|a, b| b.cmp(a));
+        let mut out = source.to_string();
+        for (from, to) in edits {
+            out.replace_range(from..to, ";");
         }
-        let mut owned: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-        for i in bad {
-            // Lines are split on `\n`, so a CRLF line still carries its `\r`;
-            // insert the `;` before it rather than between `\r` and `\n`.
-            let (body, cr) = match owned[i].strip_suffix('\r') {
-                Some(body) => (body, "\r"),
-                None => (owned[i].as_str(), ""),
-            };
-            let trimmed = body.trim_end_matches([' ', '\t']);
-            owned[i] = format!("{};{}", trimmed, cr);
-        }
-        owned.join("\n")
+        out
     }
 }
 
-/// 0-indexed source lines that hold a `** ... **` comment whose missing
-/// `;` made the lexer extend it into the next line. Mirrors Ruby:
-///   - PredictedCommentStat on COMMENT channel
-///   - start_line < end_line
-///   - first source line rstripped ends with `**`
-fn bad_line_indices(all_tokens: &[crate::token::Token], lines: &[&str]) -> Vec<usize> {
-    let mut bad = Vec::new();
+/// A `*` comment that ran past its first line and swallowed code.
+struct Swallow<'a> {
+    comment: &'a Token,
+    /// 1-based line of the first swallowed line that is a SAS statement.
+    code_line: u32,
+    /// Byte range of the first line's trailing blanks — where the `;` goes.
+    first_line_blank_tail: (usize, usize),
+    /// The code sits right after the first line, so ending the comment
+    /// there restores it without turning wrapped prose into code.
+    fixable: bool,
+}
+
+/// `*` / `**` comments that span lines (SAS runs them to the next `;`)
+/// where a swallowed line starts a SAS statement. A comment that runs to
+/// end of file found no `;`, so nothing it swallowed was a complete
+/// statement.
+fn swallows<'a>(all_tokens: &'a [Token], source: &str) -> Vec<Swallow<'a>> {
+    let mut out = Vec::new();
     for t in all_tokens {
-        if t.channel != TokenChannel::COMMENT {
+        if t.channel != TokenChannel::COMMENT
+            || t.token_type != TokenType::PredictedCommentStat
+            || t.start_line >= t.end_line
+        {
             continue;
         }
-        if t.token_type != TokenType::PredictedCommentStat {
+        let start = t.start_byte as usize;
+        let text = &source[start..t.end_byte as usize];
+        if !text.ends_with(';') {
             continue;
         }
-        if t.start_line >= t.end_line {
-            continue;
-        }
-        let idx = (t.start_line as usize).saturating_sub(1);
-        let Some(first) = lines.get(idx) else {
+        let Some(first_nl) = text.find('\n') else {
             continue;
         };
-        if !first.trim_end().ends_with("**") {
-            continue;
+        let first = &text[..first_nl];
+        let first = first.strip_suffix('\r').unwrap_or(first);
+        let kept = first.trim_end_matches([' ', '\t']).len();
+
+        let rest = &text[first_nl + 1..text.len() - 1];
+        let mut seen_text = false;
+        for (k, line) in rest.split('\n').enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if is_statement(line) {
+                out.push(Swallow {
+                    comment: t,
+                    code_line: t.start_line + 1 + k as u32,
+                    first_line_blank_tail: (start + kept, start + first.len()),
+                    fixable: !seen_text,
+                });
+                break;
+            }
+            seen_text = true;
         }
-        bad.push(idx);
     }
-    bad
+    out
 }
 
-/// Match Ruby's `source.split("\n", -1)`: a trailing newline produces a
-/// final empty string. `str::split('\n')` already does this.
-fn split_keep_empty(s: &str) -> Vec<&str> {
-    s.split('\n').collect()
+/// Whether a swallowed line, lexed on its own, starts a SAS statement —
+/// the same test `statement_not_valid` applies to code.
+fn is_statement(line: &str) -> bool {
+    let stream = TokenStream::tokenize(line);
+    let tokens: Vec<Token> = stream
+        .default
+        .into_iter()
+        .filter(|t| t.token_type != TokenType::EOF)
+        .collect();
+    match tokens.first() {
+        None => false,
+        Some(first) if statement_not_valid::is_macro(first) => {
+            first.token_type != TokenType::MacroComment
+        }
+        Some(_) => statement_not_valid::starts_validly(&tokens),
+    }
 }
 
 #[cfg(test)]

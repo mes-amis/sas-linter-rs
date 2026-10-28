@@ -202,14 +202,14 @@ impl Rule for StatementNotValid {
     }
 }
 
-fn is_macro(t: &Token) -> bool {
+pub(crate) fn is_macro(t: &Token) -> bool {
     matches!(
         t.token_type,
         TokenType::AMP | TokenType::PERCENT | TokenType::MacroSep
     ) || (TokenType::MacroComment..=TokenType::KwmRun).contains(&t.token_type)
 }
 
-fn starts_validly(stmt: &[Token]) -> bool {
+pub(crate) fn starts_validly(stmt: &[Token]) -> bool {
     let first = &stmt[0];
     let next = stmt.get(1).map(|t| t.token_type);
     match first.token_type {

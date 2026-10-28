@@ -20,7 +20,6 @@ pub mod missing_assignment_semicolon;
 pub mod orphan_format_range;
 pub mod proc_statement_missing_semicolon;
 pub mod source_headers;
-pub mod star_comment_swallows_code;
 pub mod statement_not_valid;
 pub mod tab_expansion;
 pub mod trailing_whitespace;
@@ -63,7 +62,6 @@ pub fn all_metas() -> Vec<RuleMeta> {
         inconsistent_variable_case::meta(),
         format_for_unknown_variable::meta(),
         unterminated_comment::meta(),
-        star_comment_swallows_code::meta(),
         unbalanced_do_block::meta(),
         unreachable_else_if_branch::meta(),
         proc_statement_missing_semicolon::meta(),
@@ -73,6 +71,17 @@ pub fn all_metas() -> Vec<RuleMeta> {
     ]
 }
 
+/// Rule ids folded into another rule, mapped to the id that now covers
+/// them. Configs and `--rules` lists naming a retired id keep working.
+const RETIRED_IDS: &[(&str, &str)] = &[("star_comment_swallows_code", "unterminated_comment")];
+
+fn current_id(id: &str) -> &str {
+    RETIRED_IDS
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map_or(id, |(_, new)| new)
+}
+
 pub fn default_rules() -> Vec<Box<dyn Rule>> {
     all_metas().iter().map(|m| (m.default_factory)()).collect()
 }
@@ -80,8 +89,13 @@ pub fn default_rules() -> Vec<Box<dyn Rule>> {
 pub fn rules_by_ids(ids: &[String]) -> Result<Vec<Box<dyn Rule>>> {
     let metas = all_metas();
     let mut out = Vec::with_capacity(ids.len());
+    let mut seen = std::collections::HashSet::new();
     for id in ids {
-        let m = metas.iter().find(|m| m.id == id.as_str()).ok_or_else(|| {
+        let id = current_id(id);
+        if !seen.insert(id) {
+            continue;
+        }
+        let m = metas.iter().find(|m| m.id == id).ok_or_else(|| {
             let known: Vec<&str> = metas.iter().map(|m| m.id).collect();
             anyhow!("Unknown lint rule: {:?}. Known: {}", id, known.join(", "))
         })?;
@@ -94,12 +108,17 @@ pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
     let metas = all_metas();
     let mut out: Vec<Box<dyn Rule>> = Vec::new();
 
-    // Pass 1: explicit entries, in config order.
+    // Pass 1: explicit entries, in config order. A retired id configures
+    // the rule that replaced it, unless that rule has its own entry.
     for (id, opts) in &config.rules {
+        let current = current_id(id);
+        if current != id.as_str() && config.rules.contains_key(current) {
+            continue;
+        }
         if opts.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
             continue;
         }
-        let m = metas.iter().find(|m| m.id == id.as_str()).ok_or_else(|| {
+        let m = metas.iter().find(|m| m.id == current).ok_or_else(|| {
             let known: Vec<&str> = metas.iter().map(|m| m.id).collect();
             anyhow!(
                 "Unknown lint rule in config: {:?}. Known: {}",
@@ -120,8 +139,10 @@ pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
     // Pass 2: rules not mentioned in config — default options. Matches
     // the Ruby gem: omitted rules stay enabled so adding a new rule
     // doesn't silently regress existing setups.
+    let configured: std::collections::HashSet<&str> =
+        config.rules.keys().map(|id| current_id(id)).collect();
     for m in &metas {
-        if !config.rules.contains_key(m.id) {
+        if !configured.contains(m.id) {
             out.push((m.default_factory)());
         }
     }

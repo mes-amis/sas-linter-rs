@@ -251,7 +251,8 @@ rules:
 
   unterminated_comment:
     enabled: true
-    autofix: false             # append `;` to `**…**` lines whose missing terminator eats the next line
+    autofix: false             # end the comment on its first line when the next line is the swallowed code
+                               # (replaces star_comment_swallows_code; that id is still accepted as an alias)
 
   inconsistent_variable_case:
     enabled: true
@@ -389,8 +390,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `missing_assignment_semicolon` | Assignment statements followed by an inline `**` or `*` comment but no terminating `;` (a `*` counts when two bare words follow it, e.g. `x = x * Some description;`). Autofix inserts the `;`. |
 | `proc_statement_missing_semicolon` | A `proc` statement with no `;` absorbs the statement after it as PROC options (`proc format value …` → `ERROR 22-322`). Checks `proc format` (`value` / `invalue` / `picture`), `sort` (`by`), `freq` (`tables`), `means` / `summary` (`var` / `class`) and `print` (`var`). Autofix inserts the `;`. |
 | `invalid_assignment_target` | Data-step assignment whose target is several space-separated words (`Predicted risk = ...`) — SAS variable names cannot contain spaces. Suggests the underscore-joined name; autofix applies it. |
-| `unterminated_comment` | A standalone `** … **` comment whose missing `;` lets the SAS lexer extend the comment into the next line of real code, silently swallowing it. Autofix appends the `;`. |
-| `star_comment_swallows_code` | A trailing `*` comment on a code line that isn't terminated on its own line (commonly ending in `:` — a typo for `;`). SAS runs the comment to the next `;`, silently disabling the following statement. |
+| `unterminated_comment` | A `*` or `**` comment — full-line or trailing — with no `;` on its line (often a `:` or `.` typo, or a `** … **` box line missing its `;`). SAS runs the comment to the next `;`, silently swallowing the code in between. Fires only when a swallowed line is a SAS statement, so comments that merely wrap prose, header boxes and comments that run to end of file stay quiet. Severity error. Autofix ends the comment on its first line when the swallowed code is the very next line. Replaces `star_comment_swallows_code`, which is still accepted in configs and `--rules` as an alias. |
 | `unbalanced_do_block` | `do` / `end` nesting that doesn't balance — each unclosed `do` is reported at its own line, plus any stray `end`. In SAS this is a hard compile error (`ERROR 117-185: There were N unclosed DO blocks.`) reported with no line number. Data-step `select` blocks consume an `end` too and are tracked; files containing `%do` macro blocks or a PROC SQL `select` are skipped rather than risk a false positive. Report-only by design — where a missing `end` belongs is a semantic decision. |
 | `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string, or a `label` statement is missing its `;` so a following statement keyword (`attrib`, `label`, `format`, `if`, `run`, …) is swallowed into it. Autofix inserts the `=` / `;`. |
 | `invalid_numeric_literal` | INTEGER_LITERAL tokens whose text isn't actually a valid SAS numeric literal (e.g. `1f`, `1d2`). |

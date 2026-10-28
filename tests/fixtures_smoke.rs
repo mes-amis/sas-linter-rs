@@ -50,7 +50,7 @@ const PAIRS: &[(&str, &str)] = &[
     ("format_for_unknown_variable", "format_for_unknown_variable"),
     ("inconsistent_variable_case", "inconsistent_variable_case"),
     ("unterminated_comment", "unterminated_comment"),
-    ("star_comment_swallows_code", "star_comment_swallows_code"),
+    ("unterminated_comment", "unterminated_comment_star"),
     ("source_headers", "source_headers"),
     ("unbalanced_do_block", "unbalanced_do_block"),
     ("unbalanced_do_block", "unbalanced_do_block_stray_end"),
