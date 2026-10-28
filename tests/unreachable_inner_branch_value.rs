@@ -220,6 +220,46 @@ fn a_guard_without_a_do_block_restricts_nothing() {
     assert!(findings(src).is_empty());
 }
 
+// ── Literal values ───────────────────────────────────────────────────────
+
+#[test]
+fn quote_style_does_not_change_a_string_value() {
+    let src = "if c in ('A','B') then do;\n\
+               if c = \"A\" then x = 1;\n\
+               if c = \"C\" then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 8)]);
+}
+
+#[test]
+fn trailing_blanks_do_not_change_a_string_value() {
+    // SAS pads the shorter operand with blanks before comparing.
+    let src = "if c in ('A ', 'B') then do;\n\
+               if c = 'A' then x = 1;\n\
+               if c in ('B  ', 'a') then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 17)]);
+}
+
+#[test]
+fn doubled_quotes_are_one_quote() {
+    let src = "if c in ('it''s') then do;\n\
+               if c = \"it's\" then x = 1;\n\
+               end;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
+#[test]
+fn negative_and_exponent_literals_are_values() {
+    let src = "if e in (-1, 1e2) then do;\n\
+               if e in (-1, 100) then x = 1;\n\
+               if e = -2 then x = 2;\n\
+               end;\n";
+    let f = findings(src);
+    assert_eq!(positions(src), vec![(3, 8)]);
+    assert!(f[0].message.contains("value -2 for e"), "{}", f[0].message);
+}
+
 #[test]
 fn rule_is_report_only() {
     let meta = sas_linter::rules::all_metas();

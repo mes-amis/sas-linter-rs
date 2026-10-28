@@ -6,6 +6,7 @@ use crate::rule::{CheckContext, Hook, Rule};
 
 pub mod choose_one_template;
 pub mod commented_out_guard;
+pub mod condition;
 pub mod encoding_issues;
 pub mod format_for_unknown_variable;
 pub mod identical_if_else_branches;

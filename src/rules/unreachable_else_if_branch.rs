@@ -6,6 +6,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::Token;
 
+use super::condition::{self, CmpOp, Lit};
 use super::RuleMeta;
 
 pub struct UnreachableElseIfBranch;
@@ -219,25 +220,6 @@ struct Arm {
     conjuncts: Vec<Conjunct>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Lit {
-    Int(i64),
-    /// Non-integral float, by bit pattern (so it can sit in a BTreeSet).
-    Float(u64),
-    /// String literal, quotes stripped. Case is significant.
-    Str(String),
-}
-
-impl Lit {
-    fn as_f64(&self) -> Option<f64> {
-        match self {
-            Lit::Int(n) => Some(*n as f64),
-            Lit::Float(bits) => Some(f64::from_bits(*bits)),
-            Lit::Str(_) => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum Bound {
     Unbounded,
@@ -255,25 +237,13 @@ enum Conjunct {
     Opaque(Vec<String>),
 }
 
-/// Tokens that make the whole condition opaque to conjunct splitting:
-/// `and` binds tighter than `or`, so a top-level disjunction can't be
-/// treated as an unordered set of conjuncts.
-const DISJUNCTION_OPS: &[TokenType] = &[
-    TokenType::KwOR,
-    TokenType::PIPE,
-    TokenType::PIPE2,
-    TokenType::EXCL,
-    TokenType::EXCL2,
-    TokenType::AMP,
-];
-
 /// Model an arm's condition. `None` means the arm is fully opaque — it is
 /// neither reported nor used to shadow later arms. That is the case for an
 /// empty condition and for any condition containing a function call:
 /// `lag(x)` and `rand(…)` return different values on each call, so a
 /// repeated condition is not a repeated test.
 fn analyze_condition(cond: &[Token]) -> Option<Vec<Conjunct>> {
-    let cond = strip_outer_parens(cond);
+    let cond = condition::strip_outer_parens(cond);
     if cond.is_empty() {
         return None;
     }
@@ -284,65 +254,14 @@ fn analyze_condition(cond: &[Token]) -> Option<Vec<Conjunct>> {
         return None;
     }
 
-    let mut conjuncts = Vec::new();
-    for part in split_top_level_and(cond) {
-        conjuncts.push(classify(strip_outer_parens(part)));
-    }
-    Some(conjuncts)
-}
-
-/// Split on `and` at paren depth 0. A top-level disjunction operator
-/// disables splitting: the whole condition becomes one part.
-fn split_top_level_and(cond: &[Token]) -> Vec<&[Token]> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0;
-    for (j, t) in cond.iter().enumerate() {
-        match t.token_type {
-            TokenType::LPAREN => depth += 1,
-            TokenType::RPAREN => depth = depth.saturating_sub(1),
-            TokenType::KwAND if depth == 0 => {
-                parts.push(&cond[start..j]);
-                start = j + 1;
-            }
-            ty if depth == 0 && DISJUNCTION_OPS.contains(&ty) => return vec![cond],
-            _ => {}
-        }
-    }
-    parts.push(&cond[start..]);
-    parts
-}
-
-/// Peel `( … )` pairs that enclose the entire slice.
-fn strip_outer_parens(mut toks: &[Token]) -> &[Token] {
-    loop {
-        let n = toks.len();
-        if n < 2
-            || toks[0].token_type != TokenType::LPAREN
-            || toks[n - 1].token_type != TokenType::RPAREN
-        {
-            return toks;
-        }
-        // The opening paren must match the closing one, not an inner one.
-        let mut depth = 0usize;
-        for (j, t) in toks.iter().enumerate() {
-            match t.token_type {
-                TokenType::LPAREN => depth += 1,
-                TokenType::RPAREN => {
-                    depth -= 1;
-                    if depth == 0 && j != n - 1 {
-                        return toks;
-                    }
-                }
-                _ => {}
-            }
-        }
-        toks = &toks[1..n - 1];
-    }
+    // A top-level disjunction is not a set of independent tests: the whole
+    // condition becomes one opaque part.
+    let parts = condition::split_conjuncts(cond).unwrap_or_else(|| vec![cond]);
+    Some(parts.into_iter().map(classify).collect())
 }
 
 fn classify(part: &[Token]) -> Conjunct {
-    if let Some(c) = classify_set(part).or_else(|| classify_range(part)) {
+    if let Some(c) = condition::comparison(part).and_then(|cmp| model(&cmp)) {
         return c;
     }
     Conjunct::Opaque(
@@ -356,116 +275,23 @@ fn classify(part: &[Token]) -> Conjunct {
     )
 }
 
-/// `VAR in (lit, lit, …)` (commas optional, as SAS allows) or
-/// `VAR = lit` / `VAR eq lit`.
-fn classify_set(part: &[Token]) -> Option<Conjunct> {
-    let var = part
-        .first()
-        .filter(|t| t.token_type == TokenType::Identifier)?;
-    let op = part.get(1)?;
-    let mut values = BTreeSet::new();
-    match op.token_type {
-        TokenType::KwEQ | TokenType::ASSIGN => {
-            let (lit, used) = literal_at(part, 2)?;
-            if 2 + used != part.len() {
-                return None;
-            }
-            values.insert(lit);
+/// `VAR in (…)` / `VAR = lit` as a set; `VAR lt/le/gt/ge N` as a half-line.
+fn model(cmp: &condition::Comparison) -> Option<Conjunct> {
+    let var = cmp.var_key();
+    let bound = || cmp.values[0].lit.as_f64();
+    let (lo, hi) = match cmp.op {
+        CmpOp::In => {
+            return Some(Conjunct::Set {
+                var,
+                values: cmp.values.iter().map(|v| v.lit.clone()).collect(),
+            })
         }
-        TokenType::KwIN => {
-            if part.get(2)?.token_type != TokenType::LPAREN
-                || part.last()?.token_type != TokenType::RPAREN
-            {
-                return None;
-            }
-            let mut k = 3;
-            let close = part.len() - 1;
-            while k < close {
-                if part[k].token_type == TokenType::COMMA {
-                    k += 1;
-                    continue;
-                }
-                let (lit, used) = literal_at(part, k)?;
-                values.insert(lit);
-                k += used;
-            }
-            if values.is_empty() {
-                return None;
-            }
-        }
-        _ => return None,
-    }
-    Some(Conjunct::Set {
-        var: var.text.to_lowercase(),
-        values,
-    })
-}
-
-/// `VAR lt N` / `VAR le N` / `VAR gt N` / `VAR ge N` and the symbolic forms.
-fn classify_range(part: &[Token]) -> Option<Conjunct> {
-    let var = part
-        .first()
-        .filter(|t| t.token_type == TokenType::Identifier)?;
-    let op = part.get(1)?;
-    let (lit, used) = literal_at(part, 2)?;
-    if 2 + used != part.len() {
-        return None;
-    }
-    let n = lit.as_f64()?;
-    let (lo, hi) = match op.token_type {
-        TokenType::KwLT | TokenType::LT => (Bound::Unbounded, Bound::Exclusive(n)),
-        TokenType::KwLE | TokenType::LE => (Bound::Unbounded, Bound::Inclusive(n)),
-        TokenType::KwGT | TokenType::GT => (Bound::Exclusive(n), Bound::Unbounded),
-        TokenType::KwGE | TokenType::GE => (Bound::Inclusive(n), Bound::Unbounded),
-        _ => return None,
+        CmpOp::Lt => (Bound::Unbounded, Bound::Exclusive(bound()?)),
+        CmpOp::Le => (Bound::Unbounded, Bound::Inclusive(bound()?)),
+        CmpOp::Gt => (Bound::Exclusive(bound()?), Bound::Unbounded),
+        CmpOp::Ge => (Bound::Inclusive(bound()?), Bound::Unbounded),
     };
-    Some(Conjunct::Range {
-        var: var.text.to_lowercase(),
-        lo,
-        hi,
-    })
-}
-
-/// A literal at `k`, allowing a leading unary minus. Returns the value and
-/// the number of tokens consumed.
-fn literal_at(part: &[Token], k: usize) -> Option<(Lit, usize)> {
-    let t = part.get(k)?;
-    match t.token_type {
-        TokenType::MINUS => {
-            let (lit, used) = literal_at(part, k + 1)?;
-            let neg = match lit {
-                Lit::Int(n) => Lit::Int(-n),
-                Lit::Float(bits) => num_lit(-f64::from_bits(bits)),
-                Lit::Str(_) => return None,
-            };
-            Some((neg, used + 1))
-        }
-        TokenType::IntegerLiteral | TokenType::FloatLiteral | TokenType::FloatExponentLiteral => {
-            let f: f64 = t.text.parse().ok()?;
-            Some((num_lit(f), 1))
-        }
-        TokenType::StringLiteral => {
-            let s = t.text.as_str();
-            let inner = if s.len() >= 2
-                && (s.starts_with('\'') && s.ends_with('\'')
-                    || s.starts_with('"') && s.ends_with('"'))
-            {
-                &s[1..s.len() - 1]
-            } else {
-                s
-            };
-            Some((Lit::Str(inner.to_string()), 1))
-        }
-        _ => None,
-    }
-}
-
-fn num_lit(f: f64) -> Lit {
-    if f.is_finite() && f == f.trunc() && f.abs() < i64::MAX as f64 {
-        Lit::Int(f as i64)
-    } else {
-        Lit::Float(f.to_bits())
-    }
+    Some(Conjunct::Range { var, lo, hi })
 }
 
 // ── Reasoning ────────────────────────────────────────────────────────────
