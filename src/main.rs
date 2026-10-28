@@ -273,13 +273,24 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
             .write_csv(BufWriter::new(file))
             .with_context(|| format!("writing {}", out_path.display()))?;
         let covers = match &coverage {
-            Some(c) if c.boundaries > 0 => format!(
-                " (covers {}/{} branch outcomes, {} boundary values)",
-                c.covered(),
-                c.total,
-                c.boundaries
-            ),
-            Some(c) => format!(" (covers {}/{} branch outcomes)", c.covered(), c.total),
+            Some(c) => {
+                let mut parts = vec![format!(
+                    "covers {}/{} branch outcomes",
+                    c.covered(),
+                    c.total
+                )];
+                if c.values > 0 {
+                    parts.push(format!(
+                        "{}/{} assigned values",
+                        c.values - c.unproduced.len(),
+                        c.values
+                    ));
+                }
+                if c.boundaries > 0 {
+                    parts.push(format!("{} boundary values", c.boundaries));
+                }
+                format!(" ({})", parts.join(", "))
+            }
             None => String::new(),
         };
         println!(
@@ -288,6 +299,12 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
             result.headers.len(),
             out_path.display()
         );
+        for (var, value) in coverage.iter().flat_map(|c| &c.unproduced) {
+            eprintln!(
+                "sas-lint synthesize: {}: no row gives {var} = {value}",
+                source.display()
+            );
+        }
         for (line, outcome) in coverage.iter().flat_map(|c| &c.uncovered) {
             eprintln!(
                 "sas-lint synthesize: {}:{line}: no row reaches the {} branch",
