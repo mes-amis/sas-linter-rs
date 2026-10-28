@@ -37,16 +37,19 @@ pub struct TokenStream {
 }
 
 impl TokenStream {
+    /// Tokenize `source`, or an empty stream if the lexer refuses it (only a
+    /// source over 4 GiB). Rules re-tokenize their own output with this;
+    /// file entry points check with [`TokenStream::try_tokenize`] first so a
+    /// refused file is an error, not a clean result.
     pub fn tokenize(source: &str) -> Self {
-        let result = match lex_program(&source) {
-            Ok(r) => r,
-            Err(_) => {
-                return TokenStream {
-                    default: Vec::new(),
-                    all: Vec::new(),
-                };
-            }
-        };
+        Self::try_tokenize(source).unwrap_or(TokenStream {
+            default: Vec::new(),
+            all: Vec::new(),
+        })
+    }
+
+    pub fn try_tokenize(source: &str) -> Result<Self, sas_lexer::error::ErrorKind> {
+        let result = lex_program(&source)?;
 
         let buffer = &result.buffer;
         let mut all: Vec<Token> = Vec::with_capacity(buffer.token_count() as usize);
@@ -96,7 +99,7 @@ impl TokenStream {
             .cloned()
             .collect();
 
-        TokenStream { default, all }
+        Ok(TokenStream { default, all })
     }
 }
 

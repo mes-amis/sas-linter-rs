@@ -87,6 +87,7 @@ impl Linter {
     /// rule produced a byte-different output.
     pub fn lint_file(&self, path: &Path) -> Result<Vec<Finding>> {
         let original = encoding::read_source(path)?;
+        ensure_lexable(path, &original)?;
         let (findings, modified) = self.lint_with_fixes(&original, &path.display().to_string());
         if modified.as_bytes() != original.as_bytes() {
             std::fs::write(path, modified.as_bytes())?;
@@ -123,6 +124,7 @@ impl Linter {
         formatter: &crate::formatter::Formatter,
     ) -> Result<bool> {
         let original = encoding::read_source(path)?;
+        ensure_lexable(path, &original)?;
         let modified = self.format_source(&original, formatter);
         if modified.as_bytes() == original.as_bytes() {
             return Ok(false);
@@ -130,6 +132,13 @@ impl Linter {
         std::fs::write(path, modified.as_bytes())?;
         Ok(true)
     }
+}
+
+/// A source the lexer refuses would otherwise lint as clean.
+fn ensure_lexable(path: &Path, source: &str) -> Result<()> {
+    TokenStream::try_tokenize(source)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{}: cannot tokenize: {:?}", path.display(), e))
 }
 
 /// Drop findings that a more specific rule's finding on the same line
