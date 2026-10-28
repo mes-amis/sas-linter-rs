@@ -210,7 +210,7 @@ for integer specs. For decimal ranges it's the finest decimal place of
 the bounds, and at least 0.1. `0-3` therefore yields -1, 0, 3 and 4, and
 `0.5-40.0` yields 0.4, 0.5, 40.0 and 40.1. Boundary values are packed
 into rows that already exist wherever they don't change those rows'
-branch outcomes and the cell isn't one a branch target pinned.
+branch outcomes and the cell wasn't deliberately put mid-range.
 
 Stdout reports `covers N/M branch outcomes`, plus the number of boundary
 values placed when the catalog documents any input. Stderr names each

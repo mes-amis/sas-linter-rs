@@ -446,6 +446,8 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
         row: Row,
         /// Targets this row is responsible for; later merges must keep them.
         keep: Vec<usize>,
+        /// Cells [`centre_ranges`] put mid-range; boundaries leave them be.
+        centred: HashSet<String>,
     }
 
     let g = build_graph(source, specs);
@@ -488,13 +490,14 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
             for attempt in 0..attempts {
                 let base = cands.get(ci).map(|c| c.pins.clone()).unwrap_or_default();
                 let mut pins = base.clone();
+                let mut centred = cands.get(ci).map(|c| c.centred.clone()).unwrap_or_default();
                 match (&targets[t], &need) {
                     (Target::Boundary(var, v), _) => {
-                        // Boundaries only take cells the row's branch
-                        // targets left free: a pinned value was chosen to
-                        // satisfy them (and kept mid-range), and a boundary
-                        // value can break arithmetic the graph doesn't model.
-                        if pins.get(var).is_some_and(|p| p != v) {
+                        // Boundaries may overwrite any cell the row's own
+                        // targets don't depend on, except one deliberately
+                        // put mid-range: an edge value there can break
+                        // arithmetic the graph doesn't model.
+                        if centred.contains(var) && pins.get(var) != Some(v) {
                             continue;
                         }
                         pins.insert(var.clone(), v.clone());
@@ -502,7 +505,7 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
                     (_, Some(need)) => {
                         let need =
                             pick_disjuncts(if attempt % 2 == 0 { need } else { &reversed }, rng);
-                        satisfy(&need, &mut pins, &g, rng);
+                        centred.extend(satisfy(&need, &mut pins, &g, rng));
                         repair(&need, &mut pins, &base, &g);
                     }
                     _ => unreachable!(),
@@ -517,11 +520,13 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
                         c.pins = pins;
                         c.row = row;
                         c.keep.push(t);
+                        c.centred = centred;
                     }
                     None => cands.push(Candidate {
                         pins,
                         row,
                         keep: vec![t],
+                        centred,
                     }),
                 }
                 return;
@@ -2271,23 +2276,29 @@ fn sample_value_for(var: &str, g: &Graph, rng: &mut Rng) -> Value {
 /// Recursively pin row cells to satisfy `node`. Best-effort; `Not` is a
 /// no-op (the dominant idiom is `not(missing(X))`, which non-missing cell
 /// defaults already satisfy).
-fn satisfy(node: &Pred, row: &mut Row, g: &Graph, rng: &mut Rng) {
+/// Pin cells of `row` so `node` holds. Returns the cells it moved to the
+/// middle of a two-sided range ([`centre_ranges`]).
+fn satisfy(node: &Pred, row: &mut Row, g: &Graph, rng: &mut Rng) -> HashSet<String> {
+    let mut centred = HashSet::new();
     match node {
         Pred::Atom(a) => satisfy_atom(a, row, g, rng),
         Pred::Sum(s) => satisfy_sum(s, row, g, rng),
         Pred::Cmp(c) => satisfy_cmp(c, row, g, rng),
         Pred::And(c) => {
             let before: HashSet<String> = row.keys().cloned().collect();
-            c.iter().for_each(|p| satisfy(p, row, g, rng));
-            centre_ranges(node, row, &before, g);
+            for p in c {
+                centred.extend(satisfy(p, row, g, rng));
+            }
+            centred.extend(centre_ranges(node, row, &before, g));
         }
         Pred::Or(c) => {
             if let Some(p) = rng.choose(c) {
-                satisfy(p, row, g, rng);
+                centred.extend(satisfy(p, row, g, rng));
             }
         }
         Pred::Not(_) | Pred::Tautology => {}
     }
+    centred
 }
 
 /// For each variable this conjunction just pinned that it also bounds on
@@ -2295,7 +2306,13 @@ fn satisfy(node: &Pred, row: &mut Row, g: &Graph, rng: &mut Rng) {
 /// middle of the range, or the midpoint itself. Satisfying `satisfy`'s
 /// first pick sits at an edge; a typical value keeps rows sensible for
 /// arithmetic downstream that the graph doesn't model (`wt / (ht * ht)`).
-fn centre_ranges(node: &Pred, row: &mut Row, before: &HashSet<String>, g: &Graph) {
+fn centre_ranges(
+    node: &Pred,
+    row: &mut Row,
+    before: &HashSet<String>,
+    g: &Graph,
+) -> HashSet<String> {
+    let mut centred = HashSet::new();
     fn conjuncts<'p>(node: &'p Pred, out: &mut Vec<&'p Atom>) {
         match node {
             Pred::Atom(a) if !a.is_array => out.push(a),
@@ -2355,8 +2372,10 @@ fn centre_ranges(node: &Pred, row: &mut Row, before: &HashSet<String>, g: &Graph
         };
         if fits(&best) {
             row.insert(var.to_string(), best);
+            centred.insert(var.to_string());
         }
     }
+    centred
 }
 
 fn satisfy_atom(atom: &Atom, row: &mut Row, g: &Graph, rng: &mut Rng) {
