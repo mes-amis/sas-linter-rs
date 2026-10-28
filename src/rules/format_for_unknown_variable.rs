@@ -11,7 +11,7 @@ use super::RuleMeta;
 pub struct FormatForUnknownVariable;
 
 const ID: &str = "format_for_unknown_variable";
-const DESCRIPTION: &str = "Variable named in a `format` / `informat` / `attrib` \
+const DESCRIPTION: &str = "Variable named in a `format` / `informat` / `attrib` / `label` \
                             statement is referenced nowhere else in the file — \
                             almost always a typo.";
 
@@ -30,6 +30,7 @@ enum FormatKind {
     Format,
     Informat,
     Attrib,
+    Label,
 }
 
 impl FormatKind {
@@ -38,6 +39,7 @@ impl FormatKind {
             TokenType::KwFormat => Some(FormatKind::Format),
             TokenType::KwInformat => Some(FormatKind::Informat),
             TokenType::KwAttrib => Some(FormatKind::Attrib),
+            TokenType::KwLabel => Some(FormatKind::Label),
             _ => None,
         }
     }
@@ -46,6 +48,13 @@ impl FormatKind {
             FormatKind::Format => "format",
             FormatKind::Informat => "informat",
             FormatKind::Attrib => "attrib",
+            FormatKind::Label => "label",
+        }
+    }
+    fn assigns(self) -> &'static str {
+        match self {
+            FormatKind::Label => "a label",
+            _ => "a format",
         }
     }
 }
@@ -128,9 +137,10 @@ impl Rule for FormatForUnknownVariable {
                         column: t.start_column + 1,
                         rule: ID,
                         message: format!(
-                            "`{}` assigns a format to `{}` but that variable is not \
+                            "`{}` assigns {} to `{}` but that variable is not \
                              referenced anywhere else in this file — likely a typo.",
                             kind.as_str(),
+                            kind.assigns(),
                             t.text
                         ),
                         severity: Severity::Warning,
