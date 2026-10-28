@@ -166,12 +166,17 @@ Conditions are modelled as comparisons against literals in either order
 (`x > 3`, `0 < x`), chained ranges (`5 le x le 70`), `in` lists, `sum()`
 thresholds, `max()` comparisons (`max(a, b) ge 2` holds when any argument
 does, as missing sorts below every number), comparisons between two variables (`dob < ref_date`) and
-`missing(x)`; a lone `.` is the missing value. A condition on a derived
+`missing(x)`; a lone `.` is the missing value. A parenthesised comparison
+compared with 1 or 0 (`(x = 0) = 0`) is the comparison or its negation. A condition on a derived
 variable is rewritten into a condition on what decides it, when every
 assignment to the variable is a constant (`flag = 1;`, `flag = .;`), a copy
 (`xv = v;`) or a unit conversion (`m = (inches * 0.0254);`): `flag in (0,1)`
 becomes the conditions under which one of the assignments giving 0 or 1
-runs and no later assignment overrides it. A counter (`n = 0;` then
+runs and no later assignment overrides it. A sum or difference of
+variables and constants (`n = 7 - (a + b);`, or of comparisons,
+`n = (a = 0) + (b = 0);`) is rewritten as a count over the values each
+variable's guard or catalog spec lists, and is missing when any variable
+is. A counter (`n = 0;` then
 `if c then n = n + 1;`, or `n = n + x` by a variable whose guard lists its
 values) is rewritten as a count of the steps whose conditions hold, so
 `n ge 2` becomes "at least two of those conditions". A declared input

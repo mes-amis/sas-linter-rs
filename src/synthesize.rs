@@ -237,6 +237,16 @@ pub enum Value {
 }
 
 impl Value {
+    /// A whole number as [`Value::Int`], so it is written without a
+    /// decimal point; anything else as [`Value::Float`].
+    fn number(x: f64) -> Value {
+        if x.fract() == 0.0 && x.abs() < 1e15 {
+            Value::Int(x as i64)
+        } else {
+            Value::Float(x)
+        }
+    }
+
     fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Int(n) => Some(*n as f64),
@@ -658,13 +668,50 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
 /// `node` with each OR collapsed to one randomly chosen disjunct, so the
 /// result is a plain conjunction [`repair`] sees whole.
 fn pick_disjuncts(node: &Pred, rng: &mut Rng) -> Pred {
+    pick_within(node, &[], rng)
+}
+
+/// [`pick_disjuncts`] under the atoms the enclosing conjunctions fix,
+/// passing over disjuncts that contradict one (the negated guard atoms
+/// of `not (guard and x)`, when the row must pass the guard) unless every
+/// disjunct does.
+fn pick_within(node: &Pred, fixed: &[Atom], rng: &mut Rng) -> Pred {
     match node {
-        Pred::Or(c) => rng
-            .choose(c)
-            .map_or(Pred::Tautology, |p| pick_disjuncts(p, rng)),
-        Pred::And(c) => Pred::And(c.iter().map(|p| pick_disjuncts(p, rng)).collect()),
-        Pred::Count(c) => pick_disjuncts(&pick_count(c, rng), rng),
+        Pred::Or(c) => {
+            let open: Vec<&Pred> = c.iter().filter(|p| !contradicts(p, fixed)).collect();
+            let picked = if open.is_empty() {
+                rng.choose(c)
+            } else {
+                rng.choose(&open).copied()
+            };
+            picked.map_or(Pred::Tautology, |p| pick_within(p, fixed, rng))
+        }
+        Pred::And(c) => {
+            let merged = merge_counts(c);
+            let mut fixed = fixed.to_vec();
+            fixed.extend(merged.iter().filter_map(|p| match p {
+                Pred::Atom(a) if !a.is_array && matches!(a.op, Op::In | Op::Eq) => Some(a.clone()),
+                _ => None,
+            }));
+            Pred::And(merged.iter().map(|p| pick_within(p, &fixed, rng)).collect())
+        }
+        Pred::Count(c) => pick_within(&pick_count(c, rng), fixed, rng),
         other => other.clone(),
+    }
+}
+
+/// `p` can't hold beside `fixed`: it is, or conjoins, an atom on a
+/// variable `fixed` limits to values none of which satisfy it.
+fn contradicts(p: &Pred, fixed: &[Atom]) -> bool {
+    match p {
+        Pred::Atom(a) if !a.is_array => fixed.iter().any(|f| {
+            f.var == a.var
+                && f.values
+                    .iter()
+                    .all(|v| holds(a.op, v, &a.values) == Some(false))
+        }),
+        Pred::And(c) => c.iter().any(|p| contradicts(p, fixed)),
+        _ => false,
     }
 }
 
@@ -775,7 +822,8 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
             _ => None,
         })
         .collect();
-    let derived = derived_definitions(defs, &computed, &self_declared);
+    let mut derived = derived_definitions(defs, &computed, &self_declared);
+    linear_values(&mut derived, specs);
     for p in predicates.iter_mut() {
         *p = substitute_derived(p, &derived, DERIVED_DEPTH);
     }
@@ -1055,6 +1103,56 @@ fn derived_definitions(
     out
 }
 
+/// The values each variable of a [`DefValue::Linear`] can take: those its
+/// condition lists (`a in (0,1)`), its catalog spec's, or a derived
+/// variable's constants. A variable with a sum over anything else is
+/// dropped from `derived`, so conditions on it stay unknowns.
+fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
+    let spec_values = |var: &str| match specs.lookup(var).map(|s| &s.kind) {
+        Some(SpecKind::Set(v)) => Some(v.iter().map(|&x| x as f64).collect()),
+        Some(SpecKind::Range(lo, hi)) if hi - lo < COUNTER_VALUES as i64 => {
+            Some((*lo..=*hi).map(|x| x as f64).collect())
+        }
+        _ => None,
+    };
+    let mut filled: HashMap<(String, usize), Vec<Vec<f64>>> = HashMap::new();
+    let mut unmodelled = Vec::new();
+    for (var, defs) in derived.iter() {
+        for (i, d) in defs.iter().enumerate() {
+            let DefValue::Linear(_, terms) = &d.value else {
+                continue;
+            };
+            let values: Option<Vec<Vec<f64>>> = terms
+                .iter()
+                .map(|t| match t.test {
+                    Some(_) => Some(Vec::new()),
+                    None => listed_values(&t.var, &d.cond)
+                        .or_else(|| spec_values(&t.var))
+                        .or_else(|| counter_values(&t.var, derived)),
+                })
+                .collect();
+            match values {
+                Some(v) => {
+                    filled.insert((var.clone(), i), v);
+                }
+                None => unmodelled.push(var.clone()),
+            }
+        }
+    }
+    for ((var, i), values) in filled {
+        if let Some(DefValue::Linear(_, terms)) =
+            derived.get_mut(&var).map(|defs| &mut defs[i].value)
+        {
+            for (t, v) in terms.iter_mut().zip(values) {
+                t.values = v;
+            }
+        }
+    }
+    for var in unmodelled {
+        derived.remove(&var);
+    }
+}
+
 /// Largest rewritten condition (in predicate nodes) [`substitute_derived`]
 /// will produce for one atom; beyond it the atom stays an unknown. Sources
 /// that assign one variable many times under nested conditions (casemix
@@ -1144,6 +1242,52 @@ fn substitute_cached(
                     // X = Y * k, so `X op v` is `Y op v/k`, turned round for k < 0.
                     DefValue::Add(_) | DefValue::AddVar(_) => {
                         unreachable!("counters are substituted above")
+                    }
+                    // The constant plus one count term per value of each
+                    // variable, with every variable at one of its values;
+                    // or, when the atom accepts missing, any one missing.
+                    DefValue::Linear(base, terms) => {
+                        let is = |var: &str, op: Op, values: Vec<Value>| {
+                            Pred::Atom(Atom {
+                                var: var.to_string(),
+                                op,
+                                values,
+                                is_array: false,
+                            })
+                        };
+                        let numbers = |vs: &[f64]| vs.iter().map(|&v| Value::number(v)).collect();
+                        let vars = || terms.iter().filter(|t| t.test.is_none());
+                        let mut all: Vec<Pred> = vars()
+                            .map(|t| recur(&is(&t.var, Op::In, numbers(&t.values)), cache))
+                            .collect();
+                        let tests: Vec<(Pred, f64)> = terms
+                            .iter()
+                            .filter_map(|t| Some((recur(t.test.as_ref()?, cache), t.coeff)))
+                            .collect();
+                        let steps = vars()
+                            .flat_map(|t| {
+                                t.values.iter().filter(|&&v| v * t.coeff != 0.0).map(|&v| {
+                                    (is(&t.var, Op::Eq, vec![Value::number(v)]), v * t.coeff)
+                                })
+                            })
+                            .map(|(p, k)| (recur(&p, cache), k))
+                            .chain(tests)
+                            .collect();
+                        all.push(Pred::Count(CountAtom {
+                            base: *base,
+                            terms: steps,
+                            op: a.op,
+                            values: a.values.clone(),
+                        }));
+                        let mut any_of = vec![Pred::And(all)];
+                        if holds(a.op, &Value::Missing, &a.values) == Some(true) {
+                            any_of.extend(
+                                vars().map(|t| {
+                                    recur(&is(&t.var, Op::Eq, vec![Value::Missing]), cache)
+                                }),
+                            );
+                        }
+                        Some(Pred::Or(any_of))
                     }
                     DefValue::Scaled(src, k) => {
                         let values: Option<Vec<Value>> = a
@@ -1269,7 +1413,8 @@ fn substitute_counter(
                         // One term per value `y` can take. A missing `y`
                         // would leave the counter missing; requiring it
                         // present outright (not just when the step runs)
-                        // keeps the requirement a plain conjunction.
+                        // keeps the requirement a plain conjunction. A
+                        // derived `y` is rewritten like any condition.
                         let is = |v: Value| {
                             Pred::Atom(Atom {
                                 var: y.clone(),
@@ -1278,13 +1423,13 @@ fn substitute_counter(
                                 is_array: false,
                             })
                         };
-                        all.push(negate(&is(Value::Missing)));
+                        all.extend(recur(&[negate(&is(Value::Missing))]));
                         let values =
                             listed_values(y, own).or_else(|| counter_values(y, derived))?;
                         for v in values {
                             if v != 0.0 {
                                 let mut when = own.to_vec();
-                                when.push(is(Value::Float(v)));
+                                when.push(is(Value::number(v)));
                                 terms.push((Pred::And(recur(&when)), v));
                             }
                         }
@@ -1365,20 +1510,13 @@ fn listed_values(var: &str, conds: &[Pred]) -> Option<Vec<f64>> {
 /// the base to a total the comparison accepts, the others negated.
 /// [`Pred::Tautology`] when no choice does.
 fn pick_count(c: &CountAtom, rng: &mut Rng) -> Pred {
-    // Totals in thousandths, so sums of decimal steps compare exactly.
-    let milli = |x: f64| (x * 1000.0).round() as i64;
-    let mut reachable = vec![BTreeSet::from([milli(c.base)])];
-    for (_, k) in &c.terms {
-        let prev = reachable.last().unwrap();
-        let next = prev.iter().flat_map(|&t| [t, t + milli(*k)]).collect();
-        reachable.push(next);
-    }
+    let reachable = count_reachable(c);
     let goals: Vec<i64> = reachable
         .last()
         .unwrap()
         .iter()
         .copied()
-        .filter(|&t| holds(c.op, &Value::Float(t as f64 / 1000.0), &c.values) == Some(true))
+        .filter(|&t| count_accepts(c, t))
         .collect();
     let Some(&goal) = rng.choose(&goals) else {
         return Pred::Tautology;
@@ -1397,6 +1535,71 @@ fn pick_count(c: &CountAtom, rng: &mut Rng) -> Pred {
     }
     picks.reverse();
     Pred::And(picks)
+}
+
+/// Totals in thousandths, so sums of decimal steps compare exactly.
+fn milli(x: f64) -> i64 {
+    (x * 1000.0).round() as i64
+}
+
+/// The totals `c` can reach after each prefix of its terms, in
+/// thousandths: element `j` holds those of the first `j` terms.
+fn count_reachable(c: &CountAtom) -> Vec<BTreeSet<i64>> {
+    let mut reachable = vec![BTreeSet::from([milli(c.base)])];
+    for (_, k) in &c.terms {
+        let prev = reachable.last().unwrap();
+        let next = prev.iter().flat_map(|&t| [t, t + milli(*k)]).collect();
+        reachable.push(next);
+    }
+    reachable
+}
+
+fn count_accepts(c: &CountAtom, total: i64) -> bool {
+    holds(c.op, &Value::Float(total as f64 / 1000.0), &c.values) == Some(true)
+}
+
+/// Conjuncts `c`, flattened, with comparisons on the same count (same
+/// base and terms) merged into one `in` list of the totals all of them
+/// accept, so a single pick of terms satisfies every one: `n ne 1` with
+/// `n lt 2` becomes `n in (0)`. Picked separately, each would choose its
+/// own total and the first to pin the shared cells would win.
+fn merge_counts(c: &[Pred]) -> Vec<Pred> {
+    fn flatten(p: &Pred, out: &mut Vec<Pred>) {
+        match p {
+            Pred::And(c) => c.iter().for_each(|p| flatten(p, out)),
+            p => out.push(p.clone()),
+        }
+    }
+    let mut flat = Vec::new();
+    c.iter().for_each(|p| flatten(p, &mut flat));
+    let mut out: Vec<Pred> = Vec::with_capacity(flat.len());
+    for p in flat {
+        let Pred::Count(n) = &p else {
+            out.push(p);
+            continue;
+        };
+        let same = out.iter_mut().find_map(|q| match q {
+            Pred::Count(m) if m.base == n.base && m.terms == n.terms => Some(m),
+            _ => None,
+        });
+        let Some(m) = same else {
+            out.push(p);
+            continue;
+        };
+        let values: Vec<Value> = count_reachable(n)
+            .last()
+            .unwrap()
+            .iter()
+            .filter(|&&t| count_accepts(n, t) && count_accepts(m, t))
+            .map(|&t| Value::Float(t as f64 / 1000.0))
+            .collect();
+        if values.is_empty() {
+            return vec![Pred::Or(Vec::new())];
+        }
+        m.op = Op::In;
+        m.values = values;
+    }
+    out
 }
 
 /// The last parsed condition of a counter term: failing it alone keeps
@@ -1564,6 +1767,27 @@ enum DefValue {
     AddVar(String),
     /// The value a declared input arrives with.
     Input,
+    /// `X = k - (a + b) + c …`: a constant plus each variable times its
+    /// coefficient (±1), with the values each variable can take. SAS
+    /// arithmetic is missing when any operand is.
+    Linear(f64, Vec<LinearTerm>),
+}
+
+#[derive(Clone, Debug)]
+struct LinearTerm {
+    var: String,
+    coeff: f64,
+    /// Filled in by [`linear_values`] once the graph is built.
+    values: Vec<f64>,
+    /// A comparison in parentheses (`(a = 0)`), 1 when it holds and 0
+    /// otherwise, in place of a variable.
+    test: Option<Pred>,
+}
+
+enum Operand {
+    Var(String),
+    /// The tokens of a parenthesised comparison, by index into the rhs.
+    Test(RangeInclusive<usize>),
 }
 
 enum Step {
@@ -1593,6 +1817,94 @@ fn counter_step(var: &str, rhs: &[Token]) -> Option<Step> {
         [k, op, x] if is_var(x) && op.token_type == TokenType::PLUS => step(k),
         _ => None,
     }
+}
+
+/// `k - (a + b + c)` and other sums and differences of numbers and
+/// variables in parentheses, as the constant and each variable's
+/// coefficient, from the tokens between `=` and `;`. `None` for anything
+/// else, including a sum that mentions `var` itself (a counter step) or a
+/// single operand (a constant or copy).
+fn linear_sum(var: &str, rhs: &[Token]) -> Option<(f64, Vec<(Operand, f64)>)> {
+    let mut base = 0.0;
+    let mut terms: Vec<(Operand, f64)> = Vec::new();
+    // Sign each open parenthesis applies, and the sign of the next operand.
+    let mut signs = vec![1.0];
+    let mut sign = 1.0;
+    let mut expect_operand = true;
+    let mut operands = 0;
+    let mut skip_to = 0;
+    for (i, t) in rhs.iter().enumerate() {
+        if i < skip_to {
+            continue;
+        }
+        let outer = *signs.last()?;
+        match t.token_type {
+            TokenType::LPAREN if expect_operand && comparison_in_parens(rhs, i).is_some() => {
+                let close = comparison_in_parens(rhs, i)?;
+                terms.push((Operand::Test(i + 1..=close - 1), outer * sign));
+                skip_to = close + 1;
+                (sign, expect_operand, operands) = (1.0, false, operands + 1);
+            }
+            TokenType::LPAREN if expect_operand => {
+                signs.push(outer * sign);
+                sign = 1.0;
+            }
+            TokenType::RPAREN if !expect_operand && signs.len() > 1 => {
+                signs.pop();
+            }
+            TokenType::PLUS | TokenType::MINUS => {
+                if t.token_type == TokenType::MINUS {
+                    sign = -sign;
+                }
+                expect_operand = true;
+            }
+            TokenType::IntegerLiteral
+            | TokenType::FloatLiteral
+            | TokenType::FloatExponentLiteral
+                if expect_operand =>
+            {
+                base += outer * sign * parse_lit(t).as_f64()?;
+                (sign, expect_operand, operands) = (1.0, false, operands + 1);
+            }
+            TokenType::Identifier if expect_operand && t.text != var => {
+                let coeff = outer * sign;
+                match terms
+                    .iter_mut()
+                    .find(|(v, _)| matches!(v, Operand::Var(v) if *v == t.text))
+                {
+                    Some((_, c)) => *c += coeff,
+                    None => terms.push((Operand::Var(t.text.clone()), coeff)),
+                }
+                (sign, expect_operand, operands) = (1.0, false, operands + 1);
+            }
+            _ => return None,
+        }
+    }
+    (signs.len() == 1 && !expect_operand && operands > 1 && !terms.is_empty())
+        .then_some((base, terms))
+}
+
+/// The index of the `)` closing the `(` at `open` when the tokens between
+/// hold a comparison operator outside any nested parentheses: `(a = 0)`
+/// is SAS's 1-or-0 test, where `(a + b)` is a grouping.
+fn comparison_in_parens(tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut compares = false;
+    for (j, t) in tokens.iter().enumerate().skip(open) {
+        match t.token_type {
+            TokenType::LPAREN => depth += 1,
+            TokenType::RPAREN => {
+                depth -= 1;
+                if depth == 0 {
+                    return compares.then_some(j);
+                }
+            }
+            TokenType::KwIN => compares |= depth == 1,
+            ty if cmp_op(ty).is_some() => compares |= depth == 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `Y * k`, `k * Y` or `Y / k` (optionally wrapped in one pair of parens)
@@ -1693,6 +2005,36 @@ impl Walker<'_> {
                     step.or_else(|| {
                         scaled_copy(rhs)
                             .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
+                    })
+                    .or_else(|| {
+                        linear_sum(&var, rhs).map(|(base, terms)| {
+                            let terms = terms
+                                .into_iter()
+                                .map(|(operand, coeff)| match operand {
+                                    Operand::Var(v) => LinearTerm {
+                                        var: resolve_alias(self.aliases, v),
+                                        coeff,
+                                        values: Vec::new(),
+                                        test: None,
+                                    },
+                                    Operand::Test(range) => LinearTerm {
+                                        var: String::new(),
+                                        coeff,
+                                        values: Vec::new(),
+                                        test: Some(
+                                            PredicateParser::new(
+                                                &rhs[range],
+                                                self.arrays,
+                                                self.aliases,
+                                                &mut self.used,
+                                            )
+                                            .parse(),
+                                        ),
+                                    },
+                                })
+                                .collect();
+                            DefValue::Linear(base, terms)
+                        })
                     })
                 };
                 if let Some(value) = value {
@@ -1972,8 +2314,8 @@ impl<'a> PredicateParser<'a> {
             let inner = self.parse_or();
             if self.peek(TokenType::RPAREN) {
                 self.i += 1;
-                if inner.is_some() {
-                    return inner;
+                if let Some(inner) = inner {
+                    return Some(self.compared_test(inner));
                 }
             }
             self.i = start;
@@ -1981,6 +2323,31 @@ impl<'a> PredicateParser<'a> {
             return Some(Pred::Tautology);
         }
         Some(self.parse_atom())
+    }
+
+    /// `(test) = 1`, `(test) ne 0` and the like: SAS evaluates a
+    /// parenthesised comparison to 1 or 0, so comparing that with 1 or 0
+    /// is the test or its negation. Any other comparison of it is unknown.
+    fn compared_test(&mut self, inner: Pred) -> Pred {
+        let Some(op) = ty(self.t, self.i).and_then(cmp_op) else {
+            return inner;
+        };
+        let save = self.i;
+        self.i += 1;
+        let holds_when = match (op, self.consume_literal().and_then(|v| v.as_f64())) {
+            (Op::Eq, Some(1.0)) | (Op::Ne, Some(0.0)) => Some(true),
+            (Op::Eq, Some(0.0)) | (Op::Ne, Some(1.0)) => Some(false),
+            (_, Some(_)) => None,
+            (_, None) => {
+                self.i = save;
+                return inner;
+            }
+        };
+        match holds_when {
+            Some(true) => inner,
+            Some(false) => Pred::Not(Box::new(inner)),
+            None => Pred::Tautology,
+        }
     }
 
     /// Atom shapes recognised:
@@ -3459,6 +3826,116 @@ mod tests {
         assert!(exclusive(&defs, 0, 1));
         assert!(!exclusive(&defs, 0, 2));
         assert!(!exclusive(&defs, 1, 2));
+    }
+
+    #[test]
+    fn minimal_steps_counters_by_capped_counters() {
+        // Columns are a, b, c, d. `s = 0` needs `n` present and every step
+        // off: `n = 1` and `n ge 2` both fail, which only `n = 0` does.
+        let (rows, cov) = minimal_rows(
+            "if a in (0,1) and b in (0,1) and c in (0,1) and d in (0,1) then do;\n\
+               n = 0;\n\
+               if a = 1 then n = n + 1;\n\
+               if b = 1 then n = n + 1;\n\
+               if c = 1 then n = n + 1;\n\
+               s = 0;\n\
+               if d = 1 then s = s + 1;\n\
+               if n in (0,1) then s = s + n;\n\
+               else if n ge 2 then s = s + 2;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(rows.iter().any(|r| r == &["0", "0", "0", "0"]), "{rows:?}");
+    }
+
+    #[test]
+    fn comparisons_on_one_count_merge_into_the_totals_all_accept() {
+        let term = |var: &str| {
+            Pred::Atom(Atom {
+                var: var.into(),
+                op: Op::Eq,
+                values: vec![Value::Int(1)],
+                is_array: false,
+            })
+        };
+        let count = |op, v: i64| {
+            Pred::Count(CountAtom {
+                base: 0.0,
+                terms: vec![(term("a"), 1.0), (term("b"), 1.0)],
+                op,
+                values: vec![Value::Int(v)],
+            })
+        };
+        let merged = merge_counts(&[count(Op::Ne, 1), Pred::And(vec![count(Op::Lt, 2)])]);
+        let [Pred::Count(c)] = &merged[..] else {
+            panic!("{merged:?}")
+        };
+        assert_eq!((c.op, c.values.clone()), (Op::In, vec![Value::Float(0.0)]));
+        assert_eq!(
+            merge_counts(&[count(Op::Eq, 1), count(Op::Eq, 2)]),
+            vec![Pred::Or(Vec::new())]
+        );
+    }
+
+    #[test]
+    fn minimal_reaches_each_value_of_sums_of_inputs() {
+        // Columns are a, b. `7 - (a + b)` is missing when either is, so
+        // `s = 0` needs both present and summing to 7.
+        let (rows, cov) = minimal_rows(
+            "if a in (0:4) and b in (0:4) then do;\n\
+               x = 7 - (a + b);\n\
+               if x gt 0 then s = 1; else if x = 0 then s = 0; else s = 2;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        let sum = |r: &Vec<String>| r.iter().map(|c| c.parse::<f64>().ok()).sum::<Option<f64>>();
+        assert!(rows.iter().any(|r| sum(r) == Some(7.0)), "{rows:?}");
+        assert!(
+            rows.iter().all(|r| !r.iter().any(|c| c.ends_with(".0"))),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn sums_of_comparisons_count_the_ones_that_hold() {
+        // Columns are a, b, c. `(c = 0) = 0` is `c ne 0`.
+        let (rows, cov) = minimal_rows(
+            "if a in (0,1) and b in (0,1) and c in (0,1) then do;\n\
+               if (c = 0) = 0 then n = (a = 0) + (b = 0);\n\
+               else n = 9;\n\
+               if n = 2 then s = 2; else if n = 1 then s = 1; else if n = 0 then s = 0;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(rows.iter().any(|r| r == &["0", "0", "1"]), "{rows:?}");
+    }
+
+    #[test]
+    fn linear_sums_parse_signs_through_parentheses() {
+        let rhs = |src: &str| {
+            let tokens = TokenStream::tokenize(src).default;
+            let end = statement_end(&tokens, 0);
+            tokens[..end].to_vec()
+        };
+        let (base, terms) = linear_sum("x", &rhs("7 - (a + b - 2) + (c = 0) - a;")).unwrap();
+        assert_eq!(base, 9.0);
+        let shown: Vec<(String, f64)> = terms
+            .iter()
+            .map(|(o, k)| match o {
+                Operand::Var(v) => (v.clone(), *k),
+                Operand::Test(r) => (format!("test{}", r.end() - r.start() + 1), *k),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("a".into(), -2.0),
+                ("b".into(), -1.0),
+                ("test3".into(), 1.0)
+            ]
+        );
+        assert!(linear_sum("x", &rhs("x + 1;")).is_none());
+        assert!(linear_sum("x", &rhs("a;")).is_none());
     }
 
     #[test]
