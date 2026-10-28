@@ -1,10 +1,11 @@
-use once_cell::sync::Lazy;
-use regex::Regex;
+use std::ops::Range;
 
 use crate::config::opt_bool;
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
+use crate::token::TokenStream;
 
+use super::tab_expansion::{in_ranges, literal_byte_ranges};
 use super::RuleMeta;
 
 pub struct TrailingWhitespace {
@@ -29,10 +30,6 @@ pub fn meta() -> RuleMeta {
 const ID: &str = "trailing_whitespace";
 const DESCRIPTION: &str = "Line has trailing whitespace before the newline.";
 
-// `(ws)(line terminator or EOF)` — anchor the terminator so the autofix
-// can preserve it (`$2` in Ruby).
-static TRAILING_WS: Lazy<Regex> = Lazy::new(|| Regex::new(r"([ \t]+)(\r?\n|\z)").unwrap());
-
 impl Rule for TrailingWhitespace {
     fn id(&self) -> &'static str {
         ID
@@ -51,18 +48,12 @@ impl Rule for TrailingWhitespace {
     }
 
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        for (idx, raw_line) in ctx.source.split_inclusive('\n').enumerate() {
-            let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
-            let trimmed = line.trim_end_matches([' ', '\t']);
-            if trimmed.len() == line.len() {
-                continue;
-            }
-            let col = trimmed.chars().count() + 1; // 1-based
-            findings.push(Finding {
+        trailing_runs(ctx.source, ctx.tokens)
+            .into_iter()
+            .map(|run| Finding {
                 path: ctx.path.to_string(),
-                line: (idx + 1) as u32,
-                column: col as u32,
+                line: run.line,
+                column: run.column,
                 rule: ID,
                 message: if self.autofix {
                     "trailing whitespace (autofixed)".into()
@@ -70,14 +61,54 @@ impl Rule for TrailingWhitespace {
                     "trailing whitespace".into()
                 },
                 severity: Severity::Warning,
-            });
-        }
-        findings
+            })
+            .collect()
     }
 
+    /// Drop each run reported by `check`; line terminators are untouched.
     fn autofix(&self, source: &str) -> String {
-        TRAILING_WS.replace_all(source, "$2").into_owned()
+        let mut out = String::with_capacity(source.len());
+        let mut copied = 0;
+        for run in trailing_runs(source, &TokenStream::tokenize(source)) {
+            out.push_str(&source[copied..run.bytes.start]);
+            copied = run.bytes.end;
+        }
+        out.push_str(&source[copied..]);
+        out
     }
+}
+
+/// A run of blanks between the last visible character and the line
+/// terminator (or EOF). `column` is the 1-based character column of its
+/// first blank.
+struct TrailingRun {
+    line: u32,
+    column: u32,
+    bytes: Range<usize>,
+}
+
+/// Trailing blank runs outside string literals and datalines: inside a
+/// multi-line string the blanks are part of the value, and in datalines
+/// they can be part of a fixed-width card image.
+fn trailing_runs(source: &str, tokens: &TokenStream) -> Vec<TrailingRun> {
+    let literals = literal_byte_ranges(tokens);
+    let mut runs = Vec::new();
+    let mut offset = 0;
+    for (idx, raw_line) in source.split_inclusive('\n').enumerate() {
+        let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
+        let trimmed = line.trim_end_matches([' ', '\t']);
+        let start = offset + trimmed.len();
+        offset += raw_line.len();
+        if trimmed.len() == line.len() || in_ranges(&literals, start) {
+            continue;
+        }
+        runs.push(TrailingRun {
+            line: (idx + 1) as u32,
+            column: (trimmed.chars().count() + 1) as u32,
+            bytes: start..start + (line.len() - trimmed.len()),
+        });
+    }
+    runs
 }
 
 #[cfg(test)]
