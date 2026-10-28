@@ -286,7 +286,7 @@ enum Op {
     Ge,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Atom {
     var: String,
     op: Op,
@@ -294,17 +294,26 @@ struct Atom {
     is_array: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct SumAtom {
     vars: Vec<String>,
     op: Op,
     value: Value,
 }
 
-#[derive(Clone, Debug)]
+/// `left op right` between two variables (`dob < ref_date`).
+#[derive(Clone, Debug, PartialEq)]
+struct CmpAtom {
+    left: String,
+    op: Op,
+    right: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum Pred {
     Atom(Atom),
     Sum(SumAtom),
+    Cmp(CmpAtom),
     And(Vec<Pred>),
     Or(Vec<Pred>),
     Not(Box<Pred>),
@@ -481,8 +490,13 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
                 let mut pins = base.clone();
                 match (&targets[t], &need) {
                     (Target::Boundary(var, v), _) => {
-                        // Boundaries may overwrite any cell the row's own
-                        // targets don't depend on.
+                        // Boundaries only take cells the row's branch
+                        // targets left free: a pinned value was chosen to
+                        // satisfy them (and kept mid-range), and a boundary
+                        // value can break arithmetic the graph doesn't model.
+                        if pins.get(var).is_some_and(|p| p != v) {
+                            continue;
+                        }
                         pins.insert(var.clone(), v.clone());
                     }
                     (_, Some(need)) => {
@@ -689,17 +703,35 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
         used: HashSet::new(),
         preds: Vec::new(),
         branches: Vec::new(),
+        defs: Vec::new(),
+        computed: HashSet::new(),
     };
     walker.walk(0, &[], &[]);
     let Walker {
         used,
         preds: mut predicates,
         mut branches,
+        defs,
+        computed,
         ..
     } = walker;
 
+    // Rewrite conditions on derived constants into conditions on what
+    // decides them, so guards like `flag in (0,1)` become reachable.
+    let derived = derived_definitions(defs, &computed, &self_declared);
+    for p in predicates.iter_mut() {
+        *p = substitute_derived(p, &derived, DERIVED_DEPTH);
+    }
+    for b in branches.iter_mut() {
+        b.leaf = substitute_derived(&b.leaf, &derived, DERIVED_DEPTH);
+        for r in b.reach.iter_mut() {
+            *r = substitute_derived(r, &derived, DERIVED_DEPTH);
+        }
+    }
+
     let mut base: HashSet<String> = self_declared;
     base.extend(used.difference(&assigned).cloned());
+    base.extend(collect_read(&tokens).difference(&assigned).cloned());
     for name in arrays.keys() {
         base.remove(name);
     }
@@ -722,6 +754,12 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
         char_inputs.extend(decl.members.iter().cloned());
     }
     char_inputs.extend(infer_char_inputs(&predicates));
+    char_inputs.extend(
+        inputs
+            .iter()
+            .filter(|v| matches!(specs.lookup(v).map(|s| &s.kind), Some(SpecKind::Date)))
+            .cloned(),
+    );
 
     let value_sets = build_value_sets(&inputs, &predicates, &arrays, specs, &char_inputs);
     let default_row = build_default_row(&inputs, &value_sets, &char_inputs);
@@ -747,6 +785,7 @@ fn references_input(
             None => inputs.contains(a.var.as_str()),
         },
         Pred::Sum(s) => s.vars.iter().any(|v| inputs.contains(v.as_str())),
+        Pred::Cmp(c) => inputs.contains(c.left.as_str()) || inputs.contains(c.right.as_str()),
         Pred::And(c) | Pred::Or(c) => c.iter().any(|p| references_input(p, inputs, arrays)),
         Pred::Not(c) => references_input(c, inputs, arrays),
         Pred::Tautology => false,
@@ -901,6 +940,231 @@ fn collect_assigned(tokens: &[Token]) -> HashSet<String> {
     out
 }
 
+/// How many layers of derived-on-derived definitions to unfold.
+const DERIVED_DEPTH: usize = 4;
+
+/// Constant definitions per derived variable, keeping only variables every
+/// assignment of which is a constant (and which aren't declared inputs).
+fn derived_definitions(
+    defs: Vec<Def>,
+    computed: &HashSet<String>,
+    self_declared: &HashSet<String>,
+) -> HashMap<String, Vec<Def>> {
+    let mut out: HashMap<String, Vec<Def>> = HashMap::new();
+    for d in defs {
+        if !computed.contains(&d.var) && !self_declared.contains(&d.var) {
+            out.entry(d.var.clone()).or_default().push(d);
+        }
+    }
+    out
+}
+
+/// Largest rewritten condition (in predicate nodes) [`substitute_derived`]
+/// will produce for one atom; beyond it the atom stays an unknown. Sources
+/// that assign one variable many times under nested conditions (casemix
+/// groupers) would otherwise unfold exponentially.
+const DERIVED_BUDGET: usize = 400;
+
+fn pred_size(node: &Pred) -> usize {
+    match node {
+        Pred::And(c) | Pred::Or(c) => 1 + c.iter().map(pred_size).sum::<usize>(),
+        Pred::Not(p) => 1 + pred_size(p),
+        _ => 1,
+    }
+}
+
+/// `node` with each atom on a derived constant `X op values` replaced by
+/// the conditions under which `X` ends up with a value satisfying it: for
+/// each definition `i` whose value qualifies, its condition and the
+/// failure of every later definition (the last assignment wins); plus, if
+/// missing qualifies, no definition firing at all. Atoms no definition can
+/// satisfy, or whose rewrite exceeds [`DERIVED_BUDGET`], are left as they
+/// are.
+fn substitute_derived(node: &Pred, derived: &HashMap<String, Vec<Def>>, depth: usize) -> Pred {
+    substitute_cached(node, derived, depth, &mut HashMap::new())
+}
+
+fn substitute_cached(
+    node: &Pred,
+    derived: &HashMap<String, Vec<Def>>,
+    depth: usize,
+    cache: &mut HashMap<String, Pred>,
+) -> Pred {
+    if depth == 0 {
+        return node.clone();
+    }
+    match node {
+        Pred::Atom(a) if !a.is_array && derived.contains_key(&a.var) => {
+            let key = format!("{}|{:?}|{:?}|{}", a.var, a.op, a.values, depth);
+            if let Some(p) = cache.get(&key) {
+                return p.clone();
+            }
+            let defs = &derived[&a.var];
+            let recur = |p: &Pred, cache: &mut HashMap<String, Pred>| {
+                substitute_cached(p, derived, depth - 1, cache)
+            };
+            let mut not_fired: Vec<Option<Pred>> = Vec::with_capacity(defs.len());
+            for d in defs {
+                not_fired.push((!d.cond.is_empty()).then(|| {
+                    Pred::Not(Box::new(Pred::And(
+                        d.cond.iter().map(|p| recur(p, cache)).collect(),
+                    )))
+                }));
+            }
+            // A later definition reached only by an `else` of definition i's
+            // own `if` can't fire alongside it, so it needn't be ruled out.
+            let exclusive = |i: usize, j: usize| {
+                defs[i].cond.last().is_some_and(|leaf| {
+                    defs[j]
+                        .cond
+                        .iter()
+                        .any(|c| matches!(c, Pred::Not(p) if **p == *leaf))
+                })
+            };
+            // None: an unconditional later assignment always wins.
+            let none_after = |from: usize, i: Option<usize>| -> Option<Vec<Pred>> {
+                (from..defs.len())
+                    .filter(|&j| !i.is_some_and(|i| exclusive(i, j)))
+                    .map(|j| not_fired[j].clone())
+                    .collect()
+            };
+            let mut alts = Vec::new();
+            for (i, d) in defs.iter().enumerate() {
+                // What the assigned value must satisfy, beyond reaching it.
+                let value_ok = match &d.value {
+                    DefValue::Const(v) if holds(a.op, v, &a.values) == Some(true) => None,
+                    DefValue::Const(_) => continue,
+                    DefValue::Copy(src) => Some(recur(
+                        &Pred::Atom(Atom {
+                            var: src.clone(),
+                            ..a.clone()
+                        }),
+                        cache,
+                    )),
+                    // X = Y * k, so `X op v` is `Y op v/k`, turned round for k < 0.
+                    DefValue::Scaled(src, k) => {
+                        let values: Option<Vec<Value>> = a
+                            .values
+                            .iter()
+                            .map(|v| match v {
+                                Value::Missing => Some(Value::Missing),
+                                v => v.as_f64().map(|x| Value::Float(x / k)),
+                            })
+                            .collect();
+                        let Some(values) = values else { continue };
+                        let op = if *k < 0.0 { flip(a.op) } else { a.op };
+                        Some(recur(
+                            &Pred::Atom(Atom {
+                                var: src.clone(),
+                                op,
+                                values,
+                                ..a.clone()
+                            }),
+                            cache,
+                        ))
+                    }
+                };
+                if let Some(mut later) = none_after(i + 1, Some(i)) {
+                    let mut all: Vec<Pred> = d.cond.iter().map(|p| recur(p, cache)).collect();
+                    all.extend(value_ok);
+                    all.append(&mut later);
+                    alts.push(if all.is_empty() {
+                        Pred::Tautology
+                    } else {
+                        Pred::And(all)
+                    });
+                }
+            }
+            if holds(a.op, &Value::Missing, &a.values) == Some(true) {
+                if let Some(none) = none_after(0, None) {
+                    alts.push(if none.is_empty() {
+                        Pred::Tautology
+                    } else {
+                        Pred::And(none)
+                    });
+                }
+            }
+            let out = match alts.len() {
+                0 => node.clone(),
+                1 => alts.pop().unwrap(),
+                _ => Pred::Or(alts),
+            };
+            let out = if pred_size(&out) > DERIVED_BUDGET {
+                node.clone()
+            } else {
+                out
+            };
+            cache.insert(key, out.clone());
+            out
+        }
+        Pred::And(c) => Pred::And(
+            c.iter()
+                .map(|p| substitute_cached(p, derived, depth, cache))
+                .collect(),
+        ),
+        Pred::Or(c) => Pred::Or(
+            c.iter()
+                .map(|p| substitute_cached(p, derived, depth, cache))
+                .collect(),
+        ),
+        Pred::Not(p) => Pred::Not(Box::new(substitute_cached(p, derived, depth, cache))),
+        other => other.clone(),
+    }
+}
+
+/// `var` through any chain of [`collect_aliases`] copies.
+fn resolve_alias(aliases: &HashMap<String, String>, mut var: String) -> String {
+    let mut hops = 0;
+    while let Some(src) = aliases.get(&var) {
+        hops += 1;
+        if hops > aliases.len() {
+            break;
+        }
+        var = src.clone();
+    }
+    var
+}
+
+/// SAS automatic variables: lexed as identifiers, never dataset columns.
+const AUTOMATIC_VARIABLES: [&str; 7] = [
+    "_n_", "_error_", "_iorc_", "_infile_", "_file_", "_cmd_", "_msg_",
+];
+
+/// Variables read on the right-hand side of an assignment (`x = y * 2;`,
+/// `then x = y;`, `do i = 1 to n;`). Function names, array element
+/// references and format names (`yymmdd8.`) are not variables. Combined
+/// with [`collect_assigned`] this finds inputs that never appear in an
+/// `if` head, such as `ht = raw_ht / 100;`.
+fn collect_read(tokens: &[Token]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for i in 1..tokens.len() {
+        if tokens[i].token_type != TokenType::ASSIGN
+            || tokens[i - 1].token_type != TokenType::Identifier
+            || !statement_context(tokens, i - 1)
+        {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < tokens.len() && tokens[j].token_type != TokenType::SEMI {
+            let t = &tokens[j];
+            if t.token_type == TokenType::Identifier
+                && !is(tokens, j + 1, TokenType::LPAREN)
+                && !is(tokens, j + 1, TokenType::LBRACK)
+                && !is(tokens, j + 1, TokenType::DOT)
+                && !AUTOMATIC_VARIABLES.iter().any(|a| t.text.eq_ignore_ascii_case(a))
+                // `sum(of a1-a3)`: sas-lexer has no keyword type for `of`,
+                // which only means "variable list" as a call's first word.
+                && !(t.text.eq_ignore_ascii_case("of")
+                    && (is(tokens, j - 1, TokenType::LPAREN) || is(tokens, j - 1, TokenType::COMMA)))
+            {
+                out.insert(t.text.clone());
+            }
+            j += 1;
+        }
+    }
+    out
+}
+
 /// Plain copies `X = Y;` that are `X`'s only assignment and sit outside
 /// any `if` / `do` block, mapped `X → Y`. Self-report recode sections
 /// (`smoke = raw_smoke;`) route every input through one, so predicates on `X`
@@ -970,6 +1234,64 @@ struct Walker<'a> {
     used: HashSet<String>,
     preds: Vec<Pred>,
     branches: Vec<Branch>,
+    /// Constant assignments `X = literal;` / `X = .;`, in source order,
+    /// with the condition under which each runs.
+    defs: Vec<Def>,
+    /// Variables with some assignment that isn't a constant.
+    computed: HashSet<String>,
+}
+
+/// One assignment to a derived variable of a constant or a copy of
+/// another variable, and the condition that reaches it (enclosing guards,
+/// its `then`, negated earlier `else` arms).
+#[derive(Clone, Debug)]
+struct Def {
+    var: String,
+    value: DefValue,
+    cond: Vec<Pred>,
+}
+
+#[derive(Clone, Debug)]
+enum DefValue {
+    Const(Value),
+    Copy(String),
+    /// `X = Y * k` (also `k * Y`, `Y / k`): a unit conversion.
+    Scaled(String, f64),
+}
+
+/// `Y * k`, `k * Y` or `Y / k` (optionally wrapped in one pair of parens)
+/// as `(Y, k)`, from the tokens between `=` and `;`.
+fn scaled_copy(rhs: &[Token]) -> Option<(String, f64)> {
+    let inner = match rhs {
+        [l, mid @ .., r]
+            if l.token_type == TokenType::LPAREN && r.token_type == TokenType::RPAREN =>
+        {
+            mid
+        }
+        all => all,
+    };
+    let num = |t: &Token| match t.token_type {
+        TokenType::IntegerLiteral | TokenType::FloatLiteral | TokenType::FloatExponentLiteral => {
+            parse_lit(t).as_f64()
+        }
+        _ => None,
+    };
+    match inner {
+        [y, op, k] if y.token_type == TokenType::Identifier && op.token_type == TokenType::STAR => {
+            Some((y.text.clone(), num(k)?))
+        }
+        [k, op, y] if y.token_type == TokenType::Identifier && op.token_type == TokenType::STAR => {
+            Some((y.text.clone(), num(k)?))
+        }
+        [y, op, k]
+            if y.token_type == TokenType::Identifier && op.token_type == TokenType::FSLASH =>
+        {
+            let k = num(k)?;
+            (k != 0.0).then(|| (y.text.clone(), 1.0 / k))
+        }
+        _ => None,
+    }
+    .filter(|(_, k)| *k != 0.0)
 }
 
 impl Walker<'_> {
@@ -993,7 +1315,49 @@ impl Walker<'_> {
         let mut else_at: Option<(usize, Vec<Pred>)> = None;
         // Reach for the statement after a pairing `else`.
         let mut arm: Option<Vec<Pred>> = None;
+        // Reach for the single statement after a `then`.
+        let mut then_arm: Option<Vec<Pred>> = None;
+        let start = i;
         while i < tokens.len() {
+            let statement_start = i == start
+                || matches!(
+                    ty(tokens, i - 1),
+                    Some(TokenType::SEMI | TokenType::KwThen | TokenType::KwElse)
+                );
+            if statement_start
+                && is(tokens, i, TokenType::Identifier)
+                && is(tokens, i + 1, TokenType::ASSIGN)
+            {
+                let var = tokens[i].text.clone();
+                let single = is(tokens, i + 3, TokenType::SEMI);
+                let value = if single && is(tokens, i + 2, TokenType::DOT) {
+                    Some(DefValue::Const(Value::Missing))
+                } else if single && ty(tokens, i + 2).is_some_and(is_literal) {
+                    Some(DefValue::Const(parse_lit(&tokens[i + 2])))
+                } else if single
+                    && is(tokens, i + 2, TokenType::Identifier)
+                    && tokens[i + 2].text != var
+                    && !self.arrays.contains_key(&tokens[i + 2].text)
+                {
+                    Some(DefValue::Copy(resolve_alias(
+                        self.aliases,
+                        tokens[i + 2].text.clone(),
+                    )))
+                } else {
+                    let end = statement_end(tokens, i + 2);
+                    scaled_copy(&tokens[i + 2..end])
+                        .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
+                };
+                if let Some(value) = value {
+                    let cond = then_arm
+                        .clone()
+                        .or_else(|| arm.clone())
+                        .unwrap_or_else(|| reach.clone());
+                    self.defs.push(Def { var, value, cond });
+                } else {
+                    self.computed.insert(var);
+                }
+            }
             match tokens[i].token_type {
                 TokenType::KwIf => {
                     let in_else = arm.is_some();
@@ -1036,6 +1400,9 @@ impl Walker<'_> {
                         i = end + 1;
                     } else {
                         else_at = Some((statement_end(tokens, j + 1) + 1, not_taken));
+                        let mut taken = here;
+                        taken.push(pred);
+                        then_arm = Some(taken);
                         i = j + 1;
                     }
                 }
@@ -1053,6 +1420,7 @@ impl Walker<'_> {
                 }
                 TokenType::SEMI => {
                     arm = None;
+                    then_arm = None;
                     i += 1;
                 }
                 TokenType::KwEnd => return i,
@@ -1123,6 +1491,18 @@ fn cmp_op(t: TokenType) -> Option<Op> {
     })
 }
 
+/// The operator that keeps a comparison true with its operands swapped
+/// (`3 < x` ⇔ `x > 3`).
+fn flip(op: Op) -> Op {
+    match op {
+        Op::Lt => Op::Gt,
+        Op::Le => Op::Ge,
+        Op::Gt => Op::Lt,
+        Op::Ge => Op::Le,
+        other => other,
+    }
+}
+
 fn is_literal(t: TokenType) -> bool {
     matches!(
         t,
@@ -1180,16 +1560,7 @@ impl<'a> PredicateParser<'a> {
 
     /// The variable `var` copies, through any chain of [`collect_aliases`].
     fn resolve(&self, var: String) -> String {
-        let mut var = var;
-        let mut hops = 0;
-        while let Some(src) = self.aliases.get(&var) {
-            hops += 1;
-            if hops > self.aliases.len() {
-                break;
-            }
-            var = src.clone();
-        }
-        var
+        resolve_alias(self.aliases, var)
     }
 
     fn parse(&mut self) -> Pred {
@@ -1279,10 +1650,27 @@ impl<'a> PredicateParser<'a> {
         let ident = self.peek(TokenType::Identifier);
         let next_lparen = self.peek_at(self.i + 1, TokenType::LPAREN);
 
+        if self.peek(TokenType::KwMissing)
+            && next_lparen
+            && self.peek_at(self.i + 2, TokenType::Identifier)
+            && self.peek_at(self.i + 3, TokenType::RPAREN)
+        {
+            let var = self.t[self.i + 2].text.clone();
+            self.i += 4;
+            return self.atom(var, Op::Eq, vec![Value::Missing]);
+        }
         if ident && next_lparen && self.t[self.i].text.eq_ignore_ascii_case("sum") {
             if let Some(p) = self.parse_sum() {
                 return p;
             }
+        }
+        if ty(self.t, self.i).is_some_and(is_literal)
+            && ty(self.t, self.i + 1).and_then(cmp_op).is_some()
+            && self.peek_at(self.i + 2, TokenType::Identifier)
+            && !self.peek_at(self.i + 3, TokenType::LPAREN)
+            && !self.peek_at(self.i + 3, TokenType::LBRACK)
+        {
+            return self.parse_literal_first_atom();
         }
         if ident
             && self.peek_at(self.i + 1, TokenType::LBRACK)
@@ -1322,10 +1710,44 @@ impl<'a> PredicateParser<'a> {
             if let Some(v) = self.consume_literal() {
                 return Some(self.atom(var, op, vec![v]));
             }
+            if self.peek(TokenType::Identifier)
+                && !self.peek_at(self.i + 1, TokenType::LPAREN)
+                && !self.peek_at(self.i + 1, TokenType::LBRACK)
+                && !self.arrays.contains_key(&var)
+                && !self.arrays.contains_key(&self.t[self.i].text)
+            {
+                let right = self.t[self.i].text.clone();
+                self.i += 1;
+                let (left, right) = (self.resolve(var), self.resolve(right));
+                self.used.insert(left.clone());
+                self.used.insert(right.clone());
+                return Some(Pred::Cmp(CmpAtom { left, op, right }));
+            }
         }
 
         self.i = save;
         None
+    }
+
+    /// `LIT op IDENT`, optionally chained as `LIT op IDENT op LIT`
+    /// (`5 le bmi le 70`): the comparison is turned round to read
+    /// `IDENT op' LIT`, and a chain becomes the conjunction of both ends.
+    fn parse_literal_first_atom(&mut self) -> Pred {
+        let lo = parse_lit(&self.t[self.i]);
+        let op = flip(cmp_op(self.t[self.i + 1].token_type).expect("checked by caller"));
+        let var = self.t[self.i + 2].text.clone();
+        self.i += 3;
+        let first = self.atom(var.clone(), op, vec![lo]);
+        if let Some(op2) = ty(self.t, self.i).and_then(cmp_op) {
+            let save = self.i;
+            self.i += 1;
+            if let Some(hi) = self.consume_literal() {
+                let second = self.atom(var, op2, vec![hi]);
+                return Pred::And(vec![first, second]);
+            }
+            self.i = save;
+        }
+        first
     }
 
     fn atom(&mut self, var: String, op: Op, values: Vec<Value>) -> Pred {
@@ -1481,6 +1903,8 @@ impl<'a> PredicateParser<'a> {
                     }
                     values.push(v);
                 }
+                // A lone `.` is SAS's numeric missing value: `in (., 0, 1)`.
+                TokenType::DOT if depth == 1 => values.push(Value::Missing),
                 _ => {}
             }
             self.i += 1;
@@ -1492,6 +1916,11 @@ impl<'a> PredicateParser<'a> {
     }
 
     fn consume_literal(&mut self) -> Option<Value> {
+        // A lone `.` is SAS's numeric missing value: `x = .`, `x ne .`.
+        if self.peek(TokenType::DOT) {
+            self.i += 1;
+            return Some(Value::Missing);
+        }
         let t = self.t.get(self.i).filter(|t| is_literal(t.token_type))?;
         self.i += 1;
         Some(parse_lit(t))
@@ -1556,7 +1985,7 @@ fn walk_atoms(predicates: &[Pred], f: &mut dyn FnMut(&Pred)) {
 
 fn walk_atom(node: &Pred, f: &mut dyn FnMut(&Pred)) {
     match node {
-        Pred::Atom(_) | Pred::Sum(_) => f(node),
+        Pred::Atom(_) | Pred::Sum(_) | Pred::Cmp(_) => f(node),
         Pred::And(c) | Pred::Or(c) => c.iter().for_each(|p| walk_atom(p, f)),
         Pred::Not(c) => walk_atom(c, f),
         Pred::Tautology => {}
@@ -1661,6 +2090,13 @@ fn metadata_values(kind: &SpecKind) -> Vec<Value> {
         }
         SpecKind::Set(values) => values.iter().copied().map(Value::Int).collect(),
         SpecKind::Decimal(lo, hi) => decimal_slices(*lo, *hi),
+        // Spread over a century, in order, so date comparisons go both ways.
+        SpecKind::Date => [
+            "19250101", "19400615", "19601231", "19850301", "20200101", "20251231",
+        ]
+        .into_iter()
+        .map(|d| Value::Str(d.to_string()))
+        .collect(),
     }
 }
 
@@ -1839,13 +2275,87 @@ fn satisfy(node: &Pred, row: &mut Row, g: &Graph, rng: &mut Rng) {
     match node {
         Pred::Atom(a) => satisfy_atom(a, row, g, rng),
         Pred::Sum(s) => satisfy_sum(s, row, g, rng),
-        Pred::And(c) => c.iter().for_each(|p| satisfy(p, row, g, rng)),
+        Pred::Cmp(c) => satisfy_cmp(c, row, g, rng),
+        Pred::And(c) => {
+            let before: HashSet<String> = row.keys().cloned().collect();
+            c.iter().for_each(|p| satisfy(p, row, g, rng));
+            centre_ranges(node, row, &before, g);
+        }
         Pred::Or(c) => {
             if let Some(p) = rng.choose(c) {
                 satisfy(p, row, g, rng);
             }
         }
         Pred::Not(_) | Pred::Tautology => {}
+    }
+}
+
+/// For each variable this conjunction just pinned that it also bounds on
+/// both sides (`lo < x < hi`), move the pin to the known value nearest the
+/// middle of the range, or the midpoint itself. Satisfying `satisfy`'s
+/// first pick sits at an edge; a typical value keeps rows sensible for
+/// arithmetic downstream that the graph doesn't model (`wt / (ht * ht)`).
+fn centre_ranges(node: &Pred, row: &mut Row, before: &HashSet<String>, g: &Graph) {
+    fn conjuncts<'p>(node: &'p Pred, out: &mut Vec<&'p Atom>) {
+        match node {
+            Pred::Atom(a) if !a.is_array => out.push(a),
+            Pred::And(c) => c.iter().for_each(|p| conjuncts(p, out)),
+            _ => {}
+        }
+    }
+    let mut atoms = Vec::new();
+    conjuncts(node, &mut atoms);
+    let mut bounds: HashMap<&str, (Option<f64>, Option<f64>)> = HashMap::new();
+    for a in &atoms {
+        let Some(x) = a.values.first().and_then(Value::as_f64) else {
+            continue;
+        };
+        let b = bounds.entry(a.var.as_str()).or_default();
+        match a.op {
+            Op::Gt | Op::Ge => b.0 = Some(b.0.map_or(x, |lo| lo.max(x))),
+            Op::Lt | Op::Le => b.1 = Some(b.1.map_or(x, |hi| hi.min(x))),
+            _ => {}
+        }
+    }
+    for (var, (lo, hi)) in bounds {
+        let (Some(lo), Some(hi)) = (lo, hi) else {
+            continue;
+        };
+        if lo >= hi || before.contains(var) || !row.contains_key(var) {
+            continue;
+        }
+        let mid = (lo + hi) / 2.0;
+        let fits = |v: &Value| {
+            atoms
+                .iter()
+                .filter(|a| a.var == var)
+                .all(|a| holds(a.op, v, &a.values) == Some(true))
+        };
+        let empty = Vec::new();
+        let known = g.value_sets.get(var).unwrap_or(&empty);
+        // Whole numbers when everything known about the variable is whole.
+        let centre = if known
+            .iter()
+            .all(|v| matches!(v, Value::Int(_) | Value::Missing))
+        {
+            Value::Int(mid.round() as i64)
+        } else {
+            Value::Float((mid * 1e6).round() / 1e6)
+        };
+        let best = if fits(&centre) {
+            centre
+        } else {
+            match known.iter().filter(|v| fits(v)).min_by(|a, b| {
+                let d = |v: &Value| (v.as_f64().unwrap_or(f64::MAX) - mid).abs();
+                d(a).total_cmp(&d(b))
+            }) {
+                Some(v) => v.clone(),
+                None => continue,
+            }
+        };
+        if fits(&best) {
+            row.insert(var.to_string(), best);
+        }
     }
 }
 
@@ -1862,6 +2372,52 @@ fn satisfy_atom(atom: &Atom, row: &mut Row, g: &Graph, rng: &mut Rng) {
     }
     let v = pick_satisfying_value(atom, &target, g, rng);
     row.insert(target, v);
+}
+
+/// Pin whichever side of `left op right` is still free to a value that
+/// makes the comparison hold, trying the free side's value set and the
+/// neighbours of the pinned side.
+fn satisfy_cmp(c: &CmpAtom, row: &mut Row, g: &Graph, rng: &mut Rng) {
+    let empty = Vec::new();
+    let pick = |var: &str, row: &Row, rng: &mut Rng| -> Value {
+        row.get(var).cloned().unwrap_or_else(|| {
+            let vs = g.value_sets.get(var).unwrap_or(&empty);
+            let non_missing: Vec<&Value> = vs.iter().filter(|v| **v != Value::Missing).collect();
+            rng.choose(&non_missing)
+                .map_or(Value::Missing, |v| (*v).clone())
+        })
+    };
+    let (free, fixed, fixed_is_left) = match (row.contains_key(&c.left), row.contains_key(&c.right))
+    {
+        (true, true) => return,
+        (true, false) => (c.right.as_str(), c.left.as_str(), true),
+        (false, _) => {
+            let v = pick(&c.right, row, rng);
+            row.insert(c.right.clone(), v);
+            (c.left.as_str(), c.right.as_str(), false)
+        }
+    };
+    let anchor = row[fixed].clone();
+    let holds_with = |v: &Value| {
+        let (l, r) = if fixed_is_left {
+            (&anchor, v)
+        } else {
+            (v, &anchor)
+        };
+        holds(c.op, l, std::slice::from_ref(r)) == Some(true)
+    };
+    let vs = g.value_sets.get(free).unwrap_or(&empty);
+    let mut pool: Vec<Value> = vs.clone();
+    pool.extend([
+        anchor.clone(),
+        bump(anchor.clone(), -1),
+        bump(anchor.clone(), 1),
+    ]);
+    let fits: Vec<&Value> = pool.iter().filter(|v| holds_with(v)).collect();
+    let v = rng
+        .choose(&fits)
+        .map_or_else(|| pick(free, row, rng), |v| (*v).clone());
+    row.insert(free.to_string(), v);
 }
 
 fn pick_satisfying_value(atom: &Atom, target: &str, g: &Graph, rng: &mut Rng) -> Value {
@@ -2019,6 +2575,17 @@ fn negate(node: &Pred) -> Pred {
             },
             ..a.clone()
         }),
+        Pred::Cmp(c) => Pred::Cmp(CmpAtom {
+            op: match c.op {
+                Op::In | Op::Eq => Op::Ne,
+                Op::Ne => Op::Eq,
+                Op::Lt => Op::Ge,
+                Op::Le => Op::Gt,
+                Op::Gt => Op::Le,
+                Op::Ge => Op::Lt,
+            },
+            ..c.clone()
+        }),
         Pred::Sum(s) => {
             let with = |op| Pred::Sum(SumAtom { op, ..s.clone() });
             match s.op {
@@ -2101,6 +2668,11 @@ fn eval(node: &Pred, row: &Row, g: &Graph, slot: Option<usize>) -> Option<bool> 
             }
             holds(s.op, &Value::Float(total), std::slice::from_ref(&s.value))
         }
+        Pred::Cmp(c) => holds(
+            c.op,
+            row.get(&c.left)?,
+            std::slice::from_ref(row.get(&c.right)?),
+        ),
         Pred::And(c) => kleene_and(c.iter().map(|p| eval(p, row, g, slot))),
         Pred::Or(c) => kleene_or(c.iter().map(|p| eval(p, row, g, slot))),
         Pred::Not(p) => eval(p, row, g, slot).map(|b| !b),
@@ -2231,6 +2803,150 @@ mod tests {
              run;\n",
         );
         assert_eq!(g.inputs, vec!["age", "flag", "score"]);
+    }
+
+    #[test]
+    fn literal_first_comparisons_and_chained_ranges() {
+        let g = graph(
+            "if 0 < age then a = 1;\n\
+             if 5 le bmi le 70 then b = 1;\n",
+        );
+        assert_eq!(g.inputs, vec!["age", "bmi"]);
+        assert!(matches!(&g.predicates[0], Pred::Atom(a) if a.var == "age" && a.op == Op::Gt));
+        assert!(matches!(&g.predicates[1], Pred::And(c)
+            if matches!(&c[0], Pred::Atom(a) if a.op == Op::Ge && a.values == vec![Value::Int(5)])
+            && matches!(&c[1], Pred::Atom(a) if a.op == Op::Le && a.values == vec![Value::Int(70)])));
+    }
+
+    #[test]
+    fn minimal_satisfies_literal_first_and_chained_guards() {
+        // Columns are age, bmi.
+        let (rows, cov) = minimal_rows("if 0 < age and 5 le bmi le 70 then do; ok = 1; end;\n");
+        assert!(cov.uncovered.is_empty());
+        let num = |s: &str| s.parse::<f64>().unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| num(&r[0]) > 0.0 && (5.0..=70.0).contains(&num(&r[1]))));
+    }
+
+    #[test]
+    fn missing_and_variable_comparisons_are_modelled() {
+        let g = graph("if not(missing(dob)) and dob < ref then age = 1;\n");
+        assert_eq!(g.inputs, vec!["dob", "ref"]);
+        assert!(matches!(&g.predicates[0], Pred::And(c)
+            if matches!(&c[0], Pred::Not(p) if matches!(&**p, Pred::Atom(a)
+                if a.var == "dob" && a.values == vec![Value::Missing]))
+            && matches!(&c[1], Pred::Cmp(c) if c.left == "dob" && c.op == Op::Lt && c.right == "ref")));
+    }
+
+    #[test]
+    fn minimal_drives_variable_comparisons_both_ways() {
+        // Columns are a, b.
+        let (rows, cov) = minimal_rows("if a < b then x = 1;\nelse x = 2;\n");
+        assert!(cov.uncovered.is_empty());
+        let num = |s: &str| s.parse::<f64>().unwrap();
+        assert!(rows.iter().any(|r| num(&r[0]) < num(&r[1])));
+        assert!(rows.iter().any(|r| num(&r[0]) >= num(&r[1])));
+    }
+
+    #[test]
+    fn conditions_on_derived_constants_reach_the_inputs_deciding_them() {
+        // Columns are c.
+        let (rows, cov) = minimal_rows(
+            "if c = 1 then flag = 1; else flag = 0;\n\
+             if flag in (1) then x = 1;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        assert!(rows.iter().any(|r| r[0] == "1"));
+        assert!(rows.iter().any(|r| r[0] != "1"));
+    }
+
+    #[test]
+    fn the_last_constant_assignment_wins() {
+        let g = graph("flag = 0;\nif c = 1 then flag = 1;\nif flag = 0 then x = 1;\n");
+        // flag = 0 survives only where the later `flag = 1` doesn't fire.
+        let leaf = &g.branches.last().unwrap().leaf;
+        let row = |c: i64| HashMap::from([("c".to_string(), Value::Int(c))]);
+        assert_eq!(eval(leaf, &row(1), &g, None), Some(false));
+        assert_eq!(eval(leaf, &row(2), &g, None), Some(true));
+    }
+
+    #[test]
+    fn guards_over_many_derived_indicators_become_reachable() {
+        // Columns are a, b.
+        let (rows, cov) = minimal_rows(
+            "if a = 0 then ia = 0; else if a in (1, 2) then ia = 1;\n\
+             if b = 0 then ib = 0; else if b = 1 then ib = 1;\n\
+             if ia in (0, 1) and ib in (0, 1) then do; score = 1; end;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        let ok = |r: &Vec<String>| {
+            ["0", "1", "2"].contains(&r[0].as_str()) && ["0", "1"].contains(&r[1].as_str())
+        };
+        assert!(rows.iter().any(ok));
+        assert!(rows.iter().any(|r| !ok(r)));
+    }
+
+    #[test]
+    fn computed_variables_are_not_treated_as_constants() {
+        let g = graph("n = 0;\nif a = 1 then n = n + 1;\nif n = 0 then x = 1;\n");
+        // `n = 0` is not rewritten into a condition on `a`, so it stays a
+        // branch over a derived variable and is not a coverage target.
+        assert_eq!(g.branches.len(), 1);
+    }
+
+    #[test]
+    fn conditional_copies_carry_conditions_to_their_source() {
+        // Columns are k, v.
+        let (rows, cov) = minimal_rows(
+            "if k = 1 then do; xv = v; end;\n\
+             else if k = 2 then do; xv = 0; end;\n\
+             if xv in (5) then do; hit = 1; end;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        assert!(rows.iter().any(|r| r[0] == "1" && r[1] == "5"));
+    }
+
+    #[test]
+    fn unit_conversions_carry_ranges_to_their_source() {
+        // Columns are cm, inches; the second block overwrites the first.
+        let (rows, cov) = minimal_rows(
+            "m = cm / 100;\n\
+             m = (inches * 0.0254);\n\
+             if m > 1.22 and m < 2.28 then do; ok = 1; end;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        let m = |r: &Vec<String>| r[1].parse::<f64>().unwrap_or(0.0) * 0.0254;
+        assert!(rows.iter().any(|r| m(r) > 1.22 && m(r) < 2.28));
+        assert!(rows.iter().any(|r| !(m(r) > 1.22 && m(r) < 2.28)));
+    }
+
+    #[test]
+    fn two_sided_ranges_are_satisfied_mid_range() {
+        let (rows, cov) = minimal_rows("if x > 10 and x < 20 then do; ok = 1; end;\n");
+        assert!(cov.uncovered.is_empty());
+        assert!(rows.iter().any(|r| r[0] == "15"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_lone_dot_is_the_missing_value() {
+        let g = graph("if a = . then x = 1;\nif b in (., 1) then y = 1;\nif c ne . then z = 1;\n");
+        let missing = |p: &Pred, op: Op| matches!(p, Pred::Atom(a) if a.op == op && a.values.contains(&Value::Missing));
+        assert!(missing(&g.predicates[0], Op::Eq));
+        assert!(missing(&g.predicates[1], Op::In));
+        assert!(missing(&g.predicates[2], Op::Ne));
+    }
+
+    #[test]
+    fn variables_read_only_in_assignments_are_inputs() {
+        let g = graph(
+            "ht = raw_ht / 100;\n\
+             wt = raw_wt;\n\
+             if ht > 1 then bmi = wt / (ht * ht);\n\
+             d = input(dob, yymmdd8.);\n\
+             n = sum(of a1 a2);\n",
+        );
+        assert_eq!(g.inputs, vec!["a1", "a2", "dob", "raw_ht", "raw_wt"]);
     }
 
     #[test]
@@ -2431,7 +3147,9 @@ mod tests {
              if y = 1 then do; b = z; end;\n\
              if a = 1 and b = 2 then c = 1;\n",
         );
-        assert_eq!(g.inputs, vec!["x", "y"]);
+        // `z` is read and never assigned, so it is an input in its own
+        // right; `b` is not an alias for it, so `b = 2` stays on `b`.
+        assert_eq!(g.inputs, vec!["x", "y", "z"]);
     }
 
     #[test]
