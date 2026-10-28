@@ -325,7 +325,7 @@ rules:
   encoding_issues:
     enabled: true
     autofix: false
-    use_defaults: false        # apply built-in smart-quote / em-dash / Win-1252 map
+    use_defaults: false        # apply built-in smart-quote / dash / non-breaking-space map
     replacements:              # project-specific byte→ASCII rewrites (run BEFORE defaults)
       "—": "--"
 
@@ -388,11 +388,11 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `identical_if_else_branches` | `if COND then S; else S;` with identical bodies — almost always a copy-paste error. |
 | `commented_out_guard` | SAS line-comment `* if ... then do;` pattern indicating a disabled outer validity guard. |
 | `choose_one_template` | `** CHOOSE ONE OF THE BELOW STATEMENTS;` banner indicating a broken-by-default source. |
-| `trailing_whitespace` | Trailing spaces/tabs at end of line. |
-| `tab_expansion` | Tab characters that should be spaces (configurable width). |
+| `trailing_whitespace` | Trailing spaces/tabs at end of line, outside multi-line string literals and datalines (whose blanks are data). |
+| `tab_expansion` | Tab characters that should be spaces (configurable width). Tabs inside string literals (a literal tab in `dlm="…"`) and datalines are data and are left alone. |
 | `source_headers` | Header text that leaks out of its `**` comment and runs as code — after a `;` inside the text (`** CHECKED BY: A; B **;` ends at the first `;`), or a continuation line missing its `**` — and header boxes whose missing `;` lets the comment swallow the code after it. Code that merely follows a comment on the same line is left alone. Autofix re-wraps the line as a 90-char `**  …  **;` row, turning `;` inside the text into `,`. |
-| `line_endings` | Mixed or non-CRLF line terminators (configurable target). |
-| `encoding_issues` | Smart-quote / em-dash / Win-1252 byte sequences that confuse downstream tooling. |
+| `line_endings` | Broken line terminators: a doubled CR (`\r\r\n`) or a lone CR. Autofix collapses `\r\r\n` to `\r\n` and turns a lone `\r` into the file's dominant ending. |
+| `encoding_issues` | Smart-quote / em-dash / Win-1252 punctuation that confuses downstream tooling. Autofix keeps strings and `*` comments valid: a replacement that yields the enclosing string's quote is doubled (`'It''s'`). Possible Mac Roman mojibake (Ð Ò Ó Ô Õ, which are also real letters) is reported but never rewritten. |
 | `malformed_if_condition` | Empty conditions, missing operators, orphan `then`, unbalanced parens, etc. |
 | `missing_assignment_semicolon` | Assignment statements followed by an inline `**` or `*` comment but no terminating `;`, so the comment is parsed as part of the expression. Prose is recognised by two bare words side by side, which no expression contains (`x = x ** Some description;`); a single word after the marker stays ambiguous with a real operand (`radius ** two`) and is left alone. Autofix inserts the `;` before the marker. |
 | `proc_statement_missing_semicolon` | A `proc` statement with no `;` absorbs the statement after it as PROC options (`proc format value …` → `ERROR 22-322`). Checks `proc format` (`value` / `invalue` / `picture`), `sort` (`by`), `freq` (`tables`), `means` / `summary` (`var` / `class`) and `print` (`var`). Autofix inserts the `;`. |
