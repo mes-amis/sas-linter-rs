@@ -68,3 +68,37 @@ fn proc_steps_are_skipped() {
     assert_eq!(f.len(), 1, "{:?}", f);
     assert_eq!(f[0].line, 7);
 }
+
+#[test]
+fn numbered_ranges_cover_every_member() {
+    // An array names its elements, and `a{i}` then uses them; a numbered
+    // range in either place covers `a2` as well as its endpoints.
+    let via_array = "data foo;\n array a{3} a1-a3;\n do i = 1 to 3; a{i} = 0; end;\n \
+                     format a1-a3 8.;\nrun;\n";
+    assert!(findings(via_array).is_empty(), "{:?}", findings(via_array));
+
+    let via_of_list = "data foo;\n total = sum(of q1-q3);\n format q2 8.;\nrun;\n";
+    assert!(
+        findings(via_of_list).is_empty(),
+        "{:?}",
+        findings(via_of_list)
+    );
+}
+
+#[test]
+fn a_numbered_range_is_flagged_once_when_no_member_is_used() {
+    let src = "data foo;\n x = 1;\n format r1-r3 8.;\nrun;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!((f[0].line, f[0].column), (3, 9));
+    assert!(f[0].message.contains("`r1-r3`"), "{:?}", f[0]);
+}
+
+#[test]
+fn name_and_positional_ranges_reference_their_endpoints() {
+    // `b--d` / `b-numeric-d` span variables between the endpoints; only the
+    // endpoints are names, and `numeric` is not a variable at all.
+    let src = "data foo;\n b = 1; d = 2;\n total = sum(of b--d);\n \
+               format b--d 8.;\n format b-numeric-d 8.;\nrun;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
