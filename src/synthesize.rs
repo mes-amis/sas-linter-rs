@@ -1403,7 +1403,7 @@ const LINEAR_COMBINATIONS: usize = 128;
 /// Largest rewrite of a comparison between variables with a derived side
 /// ([`cmp_alternatives`]): one alternative per value of that side, each
 /// carrying the conditions for that value.
-const CMP_BUDGET: usize = 4 * DERIVED_BUDGET;
+const CMP_BUDGET: usize = 10 * DERIVED_BUDGET;
 
 /// `c` as one alternative per value its derived side (the right one when
 /// `right`) can be given, with the other side compared with a number:
@@ -1477,7 +1477,7 @@ fn substitute_derived(node: &Pred, derived: &HashMap<String, Vec<Def>>, depth: u
 /// target is rewritten once, on its own, so it can be larger than the
 /// conditions [`DERIVED_BUDGET`] bounds, which the sampler meets again and
 /// again inside other conditions.
-const OUTCOME_BUDGET: usize = 4 * DERIVED_BUDGET;
+const OUTCOME_BUDGET: usize = 8 * DERIVED_BUDGET;
 
 fn substitute_cached(
     node: &Pred,
@@ -1927,8 +1927,12 @@ fn substitute_counter(
                             })
                         };
                         all.extend(recur(&[negate(&is(Value::Missing))]));
-                        let values =
-                            listed_values(y, own).or_else(|| counter_values(y, derived))?;
+                        // The step's own condition lists `y`'s values
+                        // most narrowly; else the guard it shares with the
+                        // reset may.
+                        let values = listed_values(y, own)
+                            .or_else(|| listed_values(y, &d.cond))
+                            .or_else(|| counter_values(y, derived))?;
                         for v in values {
                             if v + offset != 0.0 {
                                 let mut when = own.to_vec();
@@ -3034,6 +3038,28 @@ impl<'a> PredicateParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Option<Pred> {
+        // `(a - b) op k`: a difference in parentheses, compared.
+        if self.peek(TokenType::LPAREN)
+            && self.peek_at(self.i + 1, TokenType::Identifier)
+            && self.peek_at(self.i + 2, TokenType::MINUS)
+            && self.peek_at(self.i + 3, TokenType::Identifier)
+            && self.peek_at(self.i + 4, TokenType::RPAREN)
+            && !self.arrays.contains_key(&self.t[self.i + 1].text)
+            && !self.arrays.contains_key(&self.t[self.i + 3].text)
+        {
+            if let Some(op) = ty(self.t, self.i + 5).and_then(cmp_op) {
+                let save = self.i;
+                let (left, right) = (
+                    self.t[self.i + 1].text.clone(),
+                    self.t[self.i + 3].text.clone(),
+                );
+                self.i += 6;
+                if let Some(k) = self.consume_literal().and_then(|v| v.as_f64()) {
+                    return Some(self.difference(left, op, right, k));
+                }
+                self.i = save;
+            }
+        }
         if self.peek(TokenType::LPAREN) {
             let start = self.i;
             self.i += 1;
@@ -3170,15 +3196,7 @@ impl<'a> PredicateParser<'a> {
             if let Some(op) = ty(self.t, self.i + 2).and_then(cmp_op) {
                 self.i += 3;
                 if let Some(k) = self.consume_literal().and_then(|v| v.as_f64()) {
-                    let (left, right) = (self.resolve(var), self.resolve(right));
-                    self.used.insert(left.clone());
-                    self.used.insert(right.clone());
-                    return Some(Pred::Cmp(CmpAtom {
-                        left,
-                        op,
-                        right,
-                        diff: Some(k),
-                    }));
+                    return Some(self.difference(var, op, right, k));
                 }
             }
             self.i = save;
@@ -3215,6 +3233,19 @@ impl<'a> PredicateParser<'a> {
             }
         }
         None
+    }
+
+    /// `left - right op k`.
+    fn difference(&mut self, left: String, op: Op, right: String, k: f64) -> Pred {
+        let (left, right) = (self.resolve(left), self.resolve(right));
+        self.used.insert(left.clone());
+        self.used.insert(right.clone());
+        Pred::Cmp(CmpAtom {
+            left,
+            op,
+            right,
+            diff: Some(k),
+        })
     }
 
     /// `LIT op IDENT`, optionally chained as `LIT op IDENT op LIT`
@@ -4458,7 +4489,7 @@ mod tests {
         let (rows, cov) = minimal_rows(
             "if a in (0:6) and b in (0:6) then do;\n\
              if a - b ge 1 then up = 1;\n\
-             else if a - b le 0 then up = 0;\n\
+             else if (a - b) le 0 then up = 0;\n\
              end;\n",
         );
         assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
