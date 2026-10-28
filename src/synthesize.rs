@@ -29,7 +29,7 @@
 //! each row exercises in source order.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io::Write;
 use std::ops::RangeInclusive;
@@ -309,11 +309,22 @@ struct CmpAtom {
     right: String,
 }
 
+/// A counter `X = base; … if c then X = X + k; …` compared with literals:
+/// `base` plus the `k` of each term whose condition holds.
+#[derive(Clone, Debug, PartialEq)]
+struct CountAtom {
+    base: f64,
+    terms: Vec<(Pred, f64)>,
+    op: Op,
+    values: Vec<Value>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Pred {
     Atom(Atom),
     Sum(SumAtom),
     Cmp(CmpAtom),
+    Count(CountAtom),
     And(Vec<Pred>),
     Or(Vec<Pred>),
     Not(Box<Pred>),
@@ -337,6 +348,15 @@ struct Branch {
     leaf: Pred,
 }
 
+/// Derived variable `var` ending up with constant `value`, which some
+/// assignment gives it, and the input condition `need` for that.
+#[derive(Clone, Debug)]
+struct Outcome {
+    var: String,
+    value: Value,
+    need: Pred,
+}
+
 /// The source's logical graph — inputs, predicates, and per-input value sets.
 #[derive(Debug)]
 pub struct Graph {
@@ -345,6 +365,9 @@ pub struct Graph {
     /// Decision points whose own condition reads an input; the targets
     /// [`minimal`] covers.
     branches: Vec<Branch>,
+    /// Constants assigned to derived variables; the targets [`minimal`]
+    /// covers alongside branches.
+    outcomes: Vec<Outcome>,
     arrays: HashMap<String, ArrayDecl>,
     value_sets: HashMap<String, Vec<Value>>,
     default_row: HashMap<String, Value>,
@@ -410,6 +433,10 @@ pub struct Coverage {
     pub total: usize,
     /// Catalog boundary values ([`boundary_values`]) placed in some row.
     pub boundaries: usize,
+    /// Constants assigned to derived variables whose condition comes down
+    /// to inputs, and of those, `(variable, value)` no row produces.
+    pub values: usize,
+    pub unproduced: Vec<(String, String)>,
     /// `(source line, outcome)` of each outcome no row reaches — the
     /// branch is infeasible, or its condition is outside what the sampler
     /// can pin.
@@ -426,6 +453,8 @@ impl Coverage {
 enum Target {
     /// Branch `.0` of [`Graph::branches`] taking outcome `.1`.
     Branch(usize, bool),
+    /// [`Graph::outcomes`] `.0`: a derived variable given that constant.
+    Value(usize),
     /// Input `.0` holding catalog boundary value `.1`.
     Boundary(String, Value),
 }
@@ -454,6 +483,7 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     let mut rng = Rng::new(seed);
     let mut targets: Vec<Target> = (0..g.branches.len())
         .flat_map(|b| [Target::Branch(b, true), Target::Branch(b, false)])
+        .chain((0..g.outcomes.len()).map(Target::Value))
         .collect();
     for var in &g.inputs {
         if let Some(spec) = specs.lookup(var) {
@@ -464,6 +494,7 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     }
     let hit = |row: &Row, t: usize| match &targets[t] {
         Target::Branch(b, outcome) => reaches(&g.branches[*b], *outcome, row, &g),
+        Target::Value(o) => eval(&g.outcomes[*o].need, row, &g, None) == Some(true),
         Target::Boundary(var, v) => {
             row.get(var).and_then(|cell| sas_cmp(cell, v)) == Some(Ordering::Equal)
         }
@@ -473,8 +504,12 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     // targets, else a fresh row; it then becomes that row's to keep.
     let place = |t: usize, cands: &mut Vec<Candidate>, rng: &mut Rng| {
         let (need, reversed) = match &targets[t] {
-            Target::Branch(b, outcome) => {
-                let need = requirement(&g.branches[*b], *outcome);
+            Target::Branch(..) | Target::Value(_) => {
+                let need = match &targets[t] {
+                    Target::Branch(b, outcome) => requirement(&g.branches[*b], *outcome),
+                    Target::Value(o) => positive(&g.outcomes[*o].need),
+                    Target::Boundary(..) => unreachable!(),
+                };
                 // Odd attempts pin outer conditions first, for when they're
                 // the tighter bound.
                 let mut reversed = need.clone();
@@ -540,7 +575,7 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
             // A boundary a row hits by accident stays free, so a later
             // boundary can still take that cell; the pass below restores
             // any that get overwritten.
-            if matches!(target, Target::Branch(..)) {
+            if !matches!(target, Target::Boundary(..)) {
                 c.keep.push(t);
             }
             continue;
@@ -583,12 +618,19 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     let mut total = 0;
     let mut boundaries = 0;
     let mut uncovered = Vec::new();
+    let mut unproduced = Vec::new();
     for (t, target) in targets.iter().enumerate() {
         match target {
             Target::Branch(b, outcome) => {
                 total += 1;
                 if !placed(&t) {
                     uncovered.push((g.branches[*b].line, *outcome));
+                }
+            }
+            Target::Value(o) => {
+                if !placed(&t) {
+                    let o = &g.outcomes[*o];
+                    unproduced.push((o.var.clone(), o.value.to_string()));
                 }
             }
             Target::Boundary(..) => boundaries += usize::from(placed(&t)),
@@ -606,6 +648,8 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
         Coverage {
             total,
             boundaries,
+            values: g.outcomes.len(),
+            unproduced,
             uncovered,
         },
     )
@@ -619,6 +663,7 @@ fn pick_disjuncts(node: &Pred, rng: &mut Rng) -> Pred {
             .choose(c)
             .map_or(Pred::Tautology, |p| pick_disjuncts(p, rng)),
         Pred::And(c) => Pred::And(c.iter().map(|p| pick_disjuncts(p, rng)).collect()),
+        Pred::Count(c) => pick_disjuncts(&pick_count(c, rng), rng),
         other => other.clone(),
     }
 }
@@ -723,6 +768,13 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
 
     // Rewrite conditions on derived constants into conditions on what
     // decides them, so guards like `flag in (0,1)` become reachable.
+    let assigned_constants: Vec<(String, Value)> = defs
+        .iter()
+        .filter_map(|d| match &d.value {
+            DefValue::Const(v) if *v != Value::Missing => Some((d.var.clone(), v.clone())),
+            _ => None,
+        })
+        .collect();
     let derived = derived_definitions(defs, &computed, &self_declared);
     for p in predicates.iter_mut() {
         *p = substitute_derived(p, &derived, DERIVED_DEPTH);
@@ -754,6 +806,26 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
     predicates.retain(|p| references_input(p, &input_set, &arrays));
     branches.retain(|b| references_input(&b.leaf, &input_set, &arrays));
 
+    // Each constant a derived variable can be given, in source order,
+    // where its condition comes down to inputs.
+    let mut outcomes: Vec<Outcome> = Vec::new();
+    for (var, value) in assigned_constants {
+        if !derived.contains_key(&var) || outcomes.iter().any(|o| o.var == var && o.value == value)
+        {
+            continue;
+        }
+        let atom = Pred::Atom(Atom {
+            var: var.clone(),
+            op: Op::Eq,
+            values: vec![value.clone()],
+            is_array: false,
+        });
+        let need = substitute_derived(&atom, &derived, DERIVED_DEPTH);
+        if need != atom && references_input(&need, &input_set, &arrays) {
+            outcomes.push(Outcome { var, value, need });
+        }
+    }
+
     let mut char_inputs: HashSet<String> = HashSet::new();
     for decl in arrays.values().filter(|d| d.char) {
         char_inputs.extend(decl.members.iter().cloned());
@@ -773,6 +845,7 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
         inputs,
         predicates,
         branches,
+        outcomes,
         arrays,
         value_sets,
         default_row,
@@ -791,6 +864,10 @@ fn references_input(
         },
         Pred::Sum(s) => s.vars.iter().any(|v| inputs.contains(v.as_str())),
         Pred::Cmp(c) => inputs.contains(c.left.as_str()) || inputs.contains(c.right.as_str()),
+        Pred::Count(c) => c
+            .terms
+            .iter()
+            .any(|(p, _)| references_input(p, inputs, arrays)),
         Pred::And(c) | Pred::Or(c) => c.iter().any(|p| references_input(p, inputs, arrays)),
         Pred::Not(c) => references_input(c, inputs, arrays),
         Pred::Tautology => false,
@@ -949,7 +1026,9 @@ fn collect_assigned(tokens: &[Token]) -> HashSet<String> {
 const DERIVED_DEPTH: usize = 4;
 
 /// Constant definitions per derived variable, keeping only variables every
-/// assignment of which is a constant (and which aren't declared inputs).
+/// assignment of which is a constant. A declared input (`x = x;`) that the
+/// source also assigns keeps its input value until an assignment fires,
+/// so it starts with an unconditional [`DefValue::Input`].
 fn derived_definitions(
     defs: Vec<Def>,
     computed: &HashSet<String>,
@@ -957,8 +1036,20 @@ fn derived_definitions(
 ) -> HashMap<String, Vec<Def>> {
     let mut out: HashMap<String, Vec<Def>> = HashMap::new();
     for d in defs {
-        if !computed.contains(&d.var) && !self_declared.contains(&d.var) {
+        if !computed.contains(&d.var) {
             out.entry(d.var.clone()).or_default().push(d);
+        }
+    }
+    for (var, defs) in out.iter_mut() {
+        if self_declared.contains(var) {
+            defs.insert(
+                0,
+                Def {
+                    var: var.clone(),
+                    value: DefValue::Input,
+                    cond: Vec::new(),
+                },
+            );
         }
     }
     out
@@ -968,11 +1059,12 @@ fn derived_definitions(
 /// will produce for one atom; beyond it the atom stays an unknown. Sources
 /// that assign one variable many times under nested conditions (casemix
 /// groupers) would otherwise unfold exponentially.
-const DERIVED_BUDGET: usize = 400;
+const DERIVED_BUDGET: usize = 1000;
 
 fn pred_size(node: &Pred) -> usize {
     match node {
         Pred::And(c) | Pred::Or(c) => 1 + c.iter().map(pred_size).sum::<usize>(),
+        Pred::Count(c) => 1 + c.terms.iter().map(|(p, _)| pred_size(p)).sum::<usize>(),
         Pred::Not(p) => 1 + pred_size(p),
         _ => 1,
     }
@@ -1005,6 +1097,16 @@ fn substitute_cached(
                 return p.clone();
             }
             let defs = &derived[&a.var];
+            if defs
+                .iter()
+                .any(|d| matches!(d.value, DefValue::Add(_) | DefValue::AddVar(_)))
+            {
+                let out = substitute_counter(a, defs, derived, depth, cache)
+                    .filter(|p| pred_size(p) <= DERIVED_BUDGET)
+                    .unwrap_or_else(|| node.clone());
+                cache.insert(key, out.clone());
+                return out;
+            }
             let recur = |p: &Pred, cache: &mut HashMap<String, Pred>| {
                 substitute_cached(p, derived, depth - 1, cache)
             };
@@ -1016,20 +1118,10 @@ fn substitute_cached(
                     )))
                 }));
             }
-            // A later definition reached only by an `else` of definition i's
-            // own `if` can't fire alongside it, so it needn't be ruled out.
-            let exclusive = |i: usize, j: usize| {
-                defs[i].cond.last().is_some_and(|leaf| {
-                    defs[j]
-                        .cond
-                        .iter()
-                        .any(|c| matches!(c, Pred::Not(p) if **p == *leaf))
-                })
-            };
             // None: an unconditional later assignment always wins.
             let none_after = |from: usize, i: Option<usize>| -> Option<Vec<Pred>> {
                 (from..defs.len())
-                    .filter(|&j| !i.is_some_and(|i| exclusive(i, j)))
+                    .filter(|&j| !i.is_some_and(|i| exclusive(defs, i, j)))
                     .map(|j| not_fired[j].clone())
                     .collect()
             };
@@ -1039,6 +1131,9 @@ fn substitute_cached(
                 let value_ok = match &d.value {
                     DefValue::Const(v) if holds(a.op, v, &a.values) == Some(true) => None,
                     DefValue::Const(_) => continue,
+                    // The input itself must satisfy the atom; it isn't
+                    // substituted again.
+                    DefValue::Input => Some(Pred::Atom(a.clone())),
                     DefValue::Copy(src) => Some(recur(
                         &Pred::Atom(Atom {
                             var: src.clone(),
@@ -1047,6 +1142,9 @@ fn substitute_cached(
                         cache,
                     )),
                     // X = Y * k, so `X op v` is `Y op v/k`, turned round for k < 0.
+                    DefValue::Add(_) | DefValue::AddVar(_) => {
+                        unreachable!("counters are substituted above")
+                    }
                     DefValue::Scaled(src, k) => {
                         let values: Option<Vec<Value>> = a
                             .values
@@ -1114,6 +1212,212 @@ fn substitute_cached(
         ),
         Pred::Not(p) => Pred::Not(Box::new(substitute_cached(p, derived, depth, cache))),
         other => other.clone(),
+    }
+}
+
+/// Definition `j`, later than `i`, is reached only by an `else` of `i`'s
+/// own `if`, so the two can't both fire.
+fn exclusive(defs: &[Def], i: usize, j: usize) -> bool {
+    defs[i].cond.last().is_some_and(|leaf| {
+        defs[j]
+            .cond
+            .iter()
+            .any(|c| matches!(c, Pred::Not(p) if **p == *leaf))
+    })
+}
+
+/// [`substitute_derived`] for an atom on a counter (`X = 0; … if c then
+/// X = X + 1;`): for each constant reset that is the last to fire, its
+/// value plus the step of every later increment that fires must satisfy
+/// the atom. A missing reset stays missing, as `. + 1` is in SAS. `None`
+/// when a reset isn't a numeric constant.
+fn substitute_counter(
+    a: &Atom,
+    defs: &[Def],
+    derived: &HashMap<String, Vec<Def>>,
+    depth: usize,
+    cache: &mut HashMap<String, Pred>,
+) -> Option<Pred> {
+    let mut recur = |conds: &[Pred]| -> Vec<Pred> {
+        conds
+            .iter()
+            .map(|p| substitute_cached(p, derived, depth - 1, cache))
+            .collect()
+    };
+    let resets: Vec<usize> = (0..defs.len())
+        .filter(|&i| !matches!(defs[i].value, DefValue::Add(_) | DefValue::AddVar(_)))
+        .collect();
+    let mut alts = Vec::new();
+    'reset: for &i in &resets {
+        let DefValue::Const(base) = &defs[i].value else {
+            return None;
+        };
+        let mut all = recur(&defs[i].cond);
+        for &j in resets.iter().filter(|&&j| j > i && !exclusive(defs, i, j)) {
+            if defs[j].cond.is_empty() {
+                continue 'reset;
+            }
+            let fired = recur(&defs[j].cond);
+            all.push(Pred::Not(Box::new(Pred::And(fired))));
+        }
+        if *base == Value::Missing {
+            if holds(a.op, base, &a.values) != Some(true) {
+                continue;
+            }
+        } else {
+            let mut base = base.as_f64()?;
+            let mut terms = Vec::new();
+            for d in &defs[i + 1..] {
+                // The reset fired, so the guards it shares with the step hold.
+                let own = d.cond.strip_prefix(&defs[i].cond[..]).unwrap_or(&d.cond);
+                match &d.value {
+                    DefValue::Add(k) if own.is_empty() => base += k,
+                    DefValue::Add(k) => terms.push((Pred::And(recur(own)), *k)),
+                    DefValue::AddVar(y) => {
+                        // One term per value `y` can take. A missing `y`
+                        // would leave the counter missing; requiring it
+                        // present outright (not just when the step runs)
+                        // keeps the requirement a plain conjunction.
+                        let is = |v: Value| {
+                            Pred::Atom(Atom {
+                                var: y.clone(),
+                                op: Op::Eq,
+                                values: vec![v],
+                                is_array: false,
+                            })
+                        };
+                        all.push(negate(&is(Value::Missing)));
+                        let values =
+                            listed_values(y, own).or_else(|| counter_values(y, derived))?;
+                        for v in values {
+                            if v != 0.0 {
+                                let mut when = own.to_vec();
+                                when.push(is(Value::Float(v)));
+                                terms.push((Pred::And(recur(&when)), v));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            all.push(Pred::Count(CountAtom {
+                base,
+                terms,
+                op: a.op,
+                values: a.values.clone(),
+            }));
+        }
+        alts.push(Pred::And(all));
+    }
+    if holds(a.op, &Value::Missing, &a.values) == Some(true)
+        && resets.iter().all(|&i| !defs[i].cond.is_empty())
+    {
+        let none = resets
+            .iter()
+            .map(|&i| Pred::Not(Box::new(Pred::And(recur(&defs[i].cond)))))
+            .collect();
+        alts.push(Pred::And(none));
+    }
+    match alts.len() {
+        0 => None,
+        1 => alts.pop(),
+        _ => Some(Pred::Or(alts)),
+    }
+}
+
+/// Most distinct values [`counter_values`] lists for one variable.
+const COUNTER_VALUES: usize = 64;
+
+/// Every numeric value derived variable `var` can end up with: its
+/// constants, or for a counter each reset plus any combination of its
+/// constant steps. `None` when that isn't a short finite list.
+fn counter_values(var: &str, derived: &HashMap<String, Vec<Def>>) -> Option<Vec<f64>> {
+    let defs = derived.get(var)?;
+    let mut out: BTreeSet<i64> = BTreeSet::new();
+    let milli = |x: f64| (x * 1000.0).round() as i64;
+    let mut totals: BTreeSet<i64> = BTreeSet::new();
+    for d in defs {
+        match &d.value {
+            DefValue::Const(Value::Missing) => {}
+            DefValue::Const(v) => {
+                out.append(&mut totals);
+                totals.insert(milli(v.as_f64()?));
+            }
+            DefValue::Add(k) => {
+                let stepped: Vec<i64> = totals.iter().map(|t| t + milli(*k)).collect();
+                totals.extend(stepped);
+            }
+            _ => return None,
+        }
+        if totals.len() + out.len() > COUNTER_VALUES {
+            return None;
+        }
+    }
+    out.append(&mut totals);
+    Some(out.into_iter().map(|t| t as f64 / 1000.0).collect())
+}
+
+/// The numbers a condition among `conds` limits `var` to (`var in (0,1,2)`
+/// or `var = 3`): the values a step by `var` can add when it runs.
+fn listed_values(var: &str, conds: &[Pred]) -> Option<Vec<f64>> {
+    conds.iter().find_map(|c| match c {
+        Pred::Atom(a) if a.var == var && !a.is_array && matches!(a.op, Op::In | Op::Eq) => {
+            a.values.iter().map(Value::as_f64).collect()
+        }
+        Pred::And(c) => listed_values(var, c),
+        _ => None,
+    })
+}
+
+/// `c` as a plain conjunction: a random choice of terms whose steps bring
+/// the base to a total the comparison accepts, the others negated.
+/// [`Pred::Tautology`] when no choice does.
+fn pick_count(c: &CountAtom, rng: &mut Rng) -> Pred {
+    // Totals in thousandths, so sums of decimal steps compare exactly.
+    let milli = |x: f64| (x * 1000.0).round() as i64;
+    let mut reachable = vec![BTreeSet::from([milli(c.base)])];
+    for (_, k) in &c.terms {
+        let prev = reachable.last().unwrap();
+        let next = prev.iter().flat_map(|&t| [t, t + milli(*k)]).collect();
+        reachable.push(next);
+    }
+    let goals: Vec<i64> = reachable
+        .last()
+        .unwrap()
+        .iter()
+        .copied()
+        .filter(|&t| holds(c.op, &Value::Float(t as f64 / 1000.0), &c.values) == Some(true))
+        .collect();
+    let Some(&goal) = rng.choose(&goals) else {
+        return Pred::Tautology;
+    };
+    let mut need = goal;
+    let mut picks = Vec::with_capacity(c.terms.len());
+    for (j, (p, k)) in c.terms.iter().enumerate().rev() {
+        let take = reachable[j].contains(&(need - milli(*k)));
+        let skip = reachable[j].contains(&need);
+        if take && (!skip || rng.below(2) == 0) {
+            need -= milli(*k);
+            picks.push(positive(p));
+        } else {
+            picks.push(negate(step_condition(p)));
+        }
+    }
+    picks.reverse();
+    Pred::And(picks)
+}
+
+/// The last parsed condition of a counter term: failing it alone keeps
+/// the step from running, without negating guards the term shares with
+/// the rest of the row (`a in (0,1,2,3)` around `a = 2`).
+fn step_condition(term: &Pred) -> &Pred {
+    match term {
+        Pred::And(c) => c
+            .iter()
+            .rev()
+            .find(|p| !matches!(p, Pred::Tautology))
+            .map_or(term, step_condition),
+        other => other,
     }
 }
 
@@ -1262,6 +1566,41 @@ enum DefValue {
     Copy(String),
     /// `X = Y * k` (also `k * Y`, `Y / k`): a unit conversion.
     Scaled(String, f64),
+    /// `X = X + k` (also `k + X`, `X - k`): a counter step.
+    Add(f64),
+    /// `X = X + Y` (also `Y + X`): a counter step by a derived variable.
+    AddVar(String),
+    /// The value a declared input arrives with.
+    Input,
+}
+
+enum Step {
+    By(f64),
+    ByVar(String),
+}
+
+/// `X + k`, `k + X`, `X - k`, `X + Y` or `Y + X` for counter `X`, as its
+/// step, from the tokens between `=` and `;`.
+fn counter_step(var: &str, rhs: &[Token]) -> Option<Step> {
+    let num = |t: &Token| match t.token_type {
+        TokenType::IntegerLiteral | TokenType::FloatLiteral | TokenType::FloatExponentLiteral => {
+            parse_lit(t).as_f64()
+        }
+        _ => None,
+    };
+    let is_var = |t: &Token| t.token_type == TokenType::Identifier && t.text == var;
+    let step = |t: &Token| match t.token_type {
+        TokenType::Identifier if t.text != var => Some(Step::ByVar(t.text.clone())),
+        _ => num(t).map(Step::By),
+    };
+    match rhs {
+        [x, op, k] if is_var(x) && op.token_type == TokenType::PLUS => step(k),
+        [x, op, k] if is_var(x) && op.token_type == TokenType::MINUS => {
+            num(k).map(|k| Step::By(-k))
+        }
+        [k, op, x] if is_var(x) && op.token_type == TokenType::PLUS => step(k),
+        _ => None,
+    }
 }
 
 /// `Y * k`, `k * Y` or `Y / k` (optionally wrapped in one pair of parens)
@@ -1335,7 +1674,11 @@ impl Walker<'_> {
             {
                 let var = tokens[i].text.clone();
                 let single = is(tokens, i + 3, TokenType::SEMI);
-                let value = if single && is(tokens, i + 2, TokenType::DOT) {
+                let noop =
+                    single && is(tokens, i + 2, TokenType::Identifier) && tokens[i + 2].text == var;
+                let value = if noop {
+                    None
+                } else if single && is(tokens, i + 2, TokenType::DOT) {
                     Some(DefValue::Const(Value::Missing))
                 } else if single && ty(tokens, i + 2).is_some_and(is_literal) {
                     Some(DefValue::Const(parse_lit(&tokens[i + 2])))
@@ -1350,8 +1693,15 @@ impl Walker<'_> {
                     )))
                 } else {
                     let end = statement_end(tokens, i + 2);
-                    scaled_copy(&tokens[i + 2..end])
-                        .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
+                    let rhs = &tokens[i + 2..end];
+                    let step = counter_step(&var, rhs).map(|step| match step {
+                        Step::By(k) => DefValue::Add(k),
+                        Step::ByVar(y) => DefValue::AddVar(resolve_alias(self.aliases, y)),
+                    });
+                    step.or_else(|| {
+                        scaled_copy(rhs)
+                            .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
+                    })
                 };
                 if let Some(value) = value {
                     let cond = then_arm
@@ -1359,7 +1709,7 @@ impl Walker<'_> {
                         .or_else(|| arm.clone())
                         .unwrap_or_else(|| reach.clone());
                     self.defs.push(Def { var, value, cond });
-                } else {
+                } else if !noop {
                     self.computed.insert(var);
                 }
             }
@@ -1991,6 +2341,7 @@ fn walk_atoms(predicates: &[Pred], f: &mut dyn FnMut(&Pred)) {
 fn walk_atom(node: &Pred, f: &mut dyn FnMut(&Pred)) {
     match node {
         Pred::Atom(_) | Pred::Sum(_) | Pred::Cmp(_) => f(node),
+        Pred::Count(c) => c.terms.iter().for_each(|(p, _)| walk_atom(p, f)),
         Pred::And(c) | Pred::Or(c) => c.iter().for_each(|p| walk_atom(p, f)),
         Pred::Not(c) => walk_atom(c, f),
         Pred::Tautology => {}
@@ -2284,6 +2635,10 @@ fn satisfy(node: &Pred, row: &mut Row, g: &Graph, rng: &mut Rng) -> HashSet<Stri
         Pred::Atom(a) => satisfy_atom(a, row, g, rng),
         Pred::Sum(s) => satisfy_sum(s, row, g, rng),
         Pred::Cmp(c) => satisfy_cmp(c, row, g, rng),
+        Pred::Count(c) => {
+            let need = pick_disjuncts(&pick_count(c, rng), rng);
+            centred.extend(satisfy(&need, row, g, rng));
+        }
         Pred::And(c) => {
             let before: HashSet<String> = row.keys().cloned().collect();
             for p in c {
@@ -2605,6 +2960,17 @@ fn negate(node: &Pred) -> Pred {
             },
             ..c.clone()
         }),
+        Pred::Count(c) => Pred::Count(CountAtom {
+            op: match c.op {
+                Op::In | Op::Eq => Op::Ne,
+                Op::Ne => Op::In,
+                Op::Lt => Op::Ge,
+                Op::Le => Op::Gt,
+                Op::Gt => Op::Le,
+                Op::Ge => Op::Lt,
+            },
+            ..c.clone()
+        }),
         Pred::Sum(s) => {
             let with = |op| Pred::Sum(SumAtom { op, ..s.clone() });
             match s.op {
@@ -2692,6 +3058,15 @@ fn eval(node: &Pred, row: &Row, g: &Graph, slot: Option<usize>) -> Option<bool> 
             row.get(&c.left)?,
             std::slice::from_ref(row.get(&c.right)?),
         ),
+        Pred::Count(c) => {
+            let mut total = c.base;
+            for (p, k) in &c.terms {
+                if eval(p, row, g, slot)? {
+                    total += k;
+                }
+            }
+            holds(c.op, &Value::Float(total), &c.values)
+        }
         Pred::And(c) => kleene_and(c.iter().map(|p| eval(p, row, g, slot))),
         Pred::Or(c) => kleene_or(c.iter().map(|p| eval(p, row, g, slot))),
         Pred::Not(p) => eval(p, row, g, slot).map(|b| !b),
@@ -2908,10 +3283,101 @@ mod tests {
 
     #[test]
     fn computed_variables_are_not_treated_as_constants() {
-        let g = graph("n = 0;\nif a = 1 then n = n + 1;\nif n = 0 then x = 1;\n");
+        let g = graph("n = 0;\nif a = 1 then n = a * b;\nif n = 0 then x = 1;\n");
         // `n = 0` is not rewritten into a condition on `a`, so it stays a
         // branch over a derived variable and is not a coverage target.
         assert_eq!(g.branches.len(), 1);
+    }
+
+    #[test]
+    fn counters_become_counts_of_their_increments() {
+        let g = graph(
+            "n = 0;\nif a = 1 then n = n + 1;\nif b in (1, 2) then n = n + 2;\n\
+             if n = 2 then x = 1;\n",
+        );
+        assert_eq!(g.branches.len(), 3);
+        let row = |a: i64, b: i64| -> Row {
+            [("a", a), ("b", b)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), Value::Int(v)))
+                .collect()
+        };
+        let leaf = &g.branches[2].leaf;
+        assert_eq!(eval(leaf, &row(0, 1), &g, None), Some(true));
+        assert_eq!(eval(leaf, &row(1, 1), &g, None), Some(false));
+        assert_eq!(eval(leaf, &row(1, 0), &g, None), Some(false));
+    }
+
+    #[test]
+    fn minimal_produces_each_counter_total_and_assigned_value() {
+        // Columns are a, b, c. Only rows passing the guard count, and
+        // `s = 0` needs every increment off at once.
+        let (rows, cov) = minimal_rows(
+            "if a in (0, 1) and b in (0, 1) and c in (0, 1) then do;\n\
+               n = 0;\n\
+               if a = 1 then n = n + 1;\n\
+               if b = 1 then n = n + 1;\n\
+               if c = 1 then n = n + 1;\n\
+               if n = 0 then s = 0; else if n = 1 then s = 1; else if n ge 2 then s = 2;\n\
+             end;\n",
+        );
+        // Past n = 0 and n = 1, `n ge 2` can't fail.
+        assert_eq!(cov.uncovered, vec![(6, false)]);
+        assert_eq!(cov.values, 4, "n = 0 and s = 0, 1, 2");
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        let total = |r: &Vec<String>| -> Option<usize> {
+            r.iter()
+                .map(|c| match c.as_str() {
+                    "0" => Some(0),
+                    "1" => Some(1),
+                    _ => None,
+                })
+                .sum()
+        };
+        let totals: HashSet<usize> = rows.iter().filter_map(total).collect();
+        assert!(totals.contains(&0) && totals.contains(&1), "{rows:?}");
+        assert!(totals.iter().any(|&n| n >= 2), "{rows:?}");
+    }
+
+    #[test]
+    fn minimal_steps_counters_by_the_values_their_guards_list() {
+        // Columns are a, b. `s = 0` needs both steps to add nothing.
+        let (rows, cov) = minimal_rows(
+            "if a in (0,1,2) and b in (0,1,2) then do;\n\
+               s = 0;\n\
+               if a in (0,1) then s = s + a; else if a = 2 then s = s + 3;\n\
+               if b in (0,1,2) then s = s + b;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(rows.iter().any(|r| r == &["0", "0"]), "{rows:?}");
+    }
+
+    #[test]
+    fn declared_inputs_keep_their_value_until_assigned() {
+        // `f` is mapped as an input but overridden when `g` says so.
+        let g = graph("if g = 1 then f = 0;\nf = f;\nif f = 1 then x = 1;\n");
+        assert_eq!(g.inputs, vec!["f", "g"]);
+        let row = |f: i64, gv: i64| -> Row {
+            [("f", f), ("g", gv)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), Value::Int(v)))
+                .collect()
+        };
+        let leaf = &g.branches[1].leaf;
+        assert_eq!(eval(leaf, &row(1, 0), &g, None), Some(true));
+        assert_eq!(eval(leaf, &row(1, 1), &g, None), Some(false));
+    }
+
+    #[test]
+    fn counters_reset_to_missing_stay_missing() {
+        let g = graph("n = .;\nif a = 1 then do; n = 0; if b = 1 then n = n + 1; end;\nif n = . then x = 1;\n");
+        let row: Row = [("a", 0), ("b", 1)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), Value::Int(v)))
+            .collect();
+        let leaf = &g.branches.last().unwrap().leaf;
+        assert_eq!(eval(leaf, &row, &g, None), Some(true));
     }
 
     #[test]

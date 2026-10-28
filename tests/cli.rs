@@ -187,10 +187,12 @@ fn synthesize_minimal_reports_branch_coverage() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("(covers 5/6 branch outcomes)"));
+    assert!(String::from_utf8_lossy(&out.stdout)
+        .contains("(covers 5/6 branch outcomes, 1/2 assigned values)"));
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("algo.sas:2: no row reaches the true branch")
     );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("algo.sas: no row gives b = 1"));
     let csv = std::fs::read_to_string(target).unwrap();
     assert_eq!(csv.lines().next(), Some("a,c"));
     assert_eq!(csv.lines().count(), 1 + 3);
@@ -259,7 +261,7 @@ fn synthesize_minimal_adds_catalog_boundary_values() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(String::from_utf8_lossy(&out.stdout)
-        .contains("(covers 6/6 branch outcomes, 12 boundary values)"));
+        .contains("(covers 6/6 branch outcomes, 2/2 assigned values, 12 boundary values)"));
     let csv = std::fs::read_to_string(target).unwrap();
     let mut lines = csv.lines();
     assert_eq!(lines.next(), Some("a,b,w"));

@@ -170,7 +170,12 @@ variable is rewritten into a condition on what decides it, when every
 assignment to the variable is a constant (`flag = 1;`, `flag = .;`), a copy
 (`xv = v;`) or a unit conversion (`m = (inches * 0.0254);`): `flag in (0,1)`
 becomes the conditions under which one of the assignments giving 0 or 1
-runs and no later assignment overrides it.
+runs and no later assignment overrides it. A counter (`n = 0;` then
+`if c then n = n + 1;`, or `n = n + x` by a variable whose guard lists its
+values) is rewritten as a count of the steps whose conditions hold, so
+`n ge 2` becomes "at least two of those conditions". A declared input
+(`x = x;`) that the source also assigns keeps its input value unless one
+of those assignments runs.
 
 Rows come from a weighted mix of strategies:
 
@@ -212,10 +217,18 @@ the bounds, and at least 0.1. `0-3` therefore yields -1, 0, 3 and 4, and
 into rows that already exist wherever they don't change those rows'
 branch outcomes and the cell wasn't deliberately put mid-range.
 
-Stdout reports `covers N/M branch outcomes`, plus the number of boundary
-values placed when the catalog documents any input. Stderr names each
-`file:line` outcome that no row reaches, either because the branch is
-unreachable or because it's beyond what the sampler can pin. `--minimal`
+`--minimal` also aims for every constant a derived variable can be
+assigned (`score = 0` … `score = 6`, `flag = 2`), each in some row, so
+every outcome of the algorithm is exercised, not just every branch.
+Branch coverage alone misses combinations: a scale's `0` needs every
+increment off at once.
+
+Stdout reports `covers N/M branch outcomes`, plus `N/M assigned values`
+when the source assigns any constants the graph can model and the number
+of boundary values placed when the catalog documents any input. Stderr
+names each `file:line` outcome and each `variable = value` that no row
+reaches, either because it's unreachable or because it's beyond what the
+sampler can pin. `--minimal`
 can't be combined with `--size`, `--weights`, `--perturbation-prob` or
 `--combo-size`.
 
