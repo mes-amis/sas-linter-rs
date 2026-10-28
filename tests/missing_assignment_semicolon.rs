@@ -125,3 +125,22 @@ fn a_mid_line_star_outside_an_assignment_stays_silent() {
     let src = "proc freq;\n tables a * b c;\nrun;\n";
     assert!(findings(src).is_empty(), "{:?}", findings(src));
 }
+
+#[test]
+fn leaked_header_prose_is_not_a_statement_missing_its_semicolon() {
+    // The box has no terminators, so its comment ends at `A Person;` and the
+    // rest is header prose running as code: source_headers' finding.
+    let src = "*****************************************\n\
+               **  CHECKED BY:  A Person; B Person\n\
+               **  DATE:        01/02/2003\n\
+               **  PURPOSE:     compute summary scores\n\
+               *****************************************;\n\
+               data a;\nrun;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
+#[test]
+fn one_finding_per_statement() {
+    let src = "x = y\n** first note line\n** second note line;\n";
+    assert_eq!(findings(src).len(), 1, "{:?}", findings(src));
+}

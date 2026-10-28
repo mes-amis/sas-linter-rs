@@ -4,7 +4,8 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
-use super::RuleMeta;
+use super::sas::FORMAT_DEFINITIONS;
+use super::{statement_not_valid, RuleMeta};
 
 pub struct MissingAssignmentSemicolon {
     autofix: bool,
@@ -133,36 +134,50 @@ fn in_assignment(tokens: &[Token], i: usize) -> bool {
     })
 }
 
-/// `*` / `**` markers that start comment prose: in an assignment, or at the
-/// start of a line inside any statement whose `;` is missing (a `** … **;`
-/// banner swallowed by the `value` statement above it). Mid-line outside an
-/// assignment, words can follow `*` legitimately (`tables a * b c;`). Two bare
-/// words side by side can't occur in an expression, so the first such pair
-/// in a statement is prose, and the comment starts at the last marker
-/// before it (`x = a * b ** Note on x;`). A single word stays ambiguous
-/// with a real operand (`radius ** two`) and is left alone.
+/// `*` / `**` markers that start comment prose, one per statement: in an
+/// assignment, or at the start of a line inside a recognisable statement
+/// whose `;` is missing (a `** … **;` banner swallowed by the `value`
+/// statement above it). Mid-line outside an assignment, words can follow
+/// `*` legitimately (`tables a * b c;`). A statement that is prose from its
+/// first word is leaked header text, which `source_headers` reports.
 fn offenders(tokens: &[Token]) -> Vec<(&Token, &Token, &Token)> {
     let mut out = Vec::new();
+    let mut stmt_start = 0;
     let mut marker: Option<usize> = None;
+    let mut reported = false;
     for k in 0..tokens.len() {
         match tokens[k].token_type {
-            TokenType::SEMI => marker = None,
+            TokenType::SEMI => {
+                stmt_start = k + 1;
+                marker = None;
+                reported = false;
+                continue;
+            }
             TokenType::STAR | TokenType::STAR2 if k > 0 => marker = Some(k),
             _ => {}
         }
         let Some(m) = marker else {
             continue;
         };
-        if k > m
+        if !reported
+            && k > m
             && k + 1 < tokens.len()
             && is_bare_word(tokens, k)
             && is_bare_word(tokens, k + 1)
-            && (in_assignment(tokens, m) || begins_line(tokens, m))
+            && (in_assignment(tokens, m)
+                || (begins_line(tokens, m) && is_real_statement(&tokens[stmt_start..m])))
         {
             out.push((&tokens[m], &tokens[m - 1], &tokens[m + 1]));
-            // One finding per statement.
-            marker = None;
+            reported = true;
         }
     }
     out
+}
+
+/// A statement that starts like SAS code: a data-step or global statement,
+/// or a PROC FORMAT definition.
+fn is_real_statement(stmt: &[Token]) -> bool {
+    stmt.first()
+        .is_some_and(|first| FORMAT_DEFINITIONS.contains(&first.text.to_lowercase().as_str()))
+        || (!stmt.is_empty() && statement_not_valid::starts_validly(stmt))
 }
