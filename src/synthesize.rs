@@ -672,9 +672,11 @@ fn pick_disjuncts(node: &Pred, rng: &mut Rng) -> Pred {
 }
 
 /// [`pick_disjuncts`] under the atoms the enclosing conjunctions fix,
-/// passing over disjuncts that contradict one (the negated guard atoms
+/// passing over disjuncts that contradict them (the negated guard atoms
 /// of `not (guard and x)`, when the row must pass the guard) unless every
-/// disjunct does.
+/// disjunct does. Within a conjunction, the atoms each conjunct's pick
+/// commits to bind the conjuncts after it, so counts over shared inputs
+/// choose steps that agree.
 fn pick_within(node: &Pred, fixed: &[Atom], rng: &mut Rng) -> Pred {
     match node {
         Pred::Or(c) => {
@@ -690,28 +692,59 @@ fn pick_within(node: &Pred, fixed: &[Atom], rng: &mut Rng) -> Pred {
             let merged = merge_counts(c);
             let mut fixed = fixed.to_vec();
             fixed.extend(merged.iter().filter_map(|p| match p {
-                Pred::Atom(a) if !a.is_array && matches!(a.op, Op::In | Op::Eq) => Some(a.clone()),
+                Pred::Atom(a) if !a.is_array => Some(a.clone()),
                 _ => None,
             }));
-            Pred::And(merged.iter().map(|p| pick_within(p, &fixed, rng)).collect())
+            let mut picked = Vec::with_capacity(merged.len());
+            for p in &merged {
+                let pick = pick_within(p, &fixed, rng);
+                if !matches!(p, Pred::Atom(_)) {
+                    conjunct_atoms(&pick, &mut fixed);
+                }
+                picked.push(pick);
+            }
+            Pred::And(picked)
         }
-        Pred::Count(c) => pick_within(&pick_count(c, rng), fixed, rng),
+        Pred::Count(c) => pick_within(&pick_count(c, fixed, rng), fixed, rng),
         other => other.clone(),
     }
 }
 
-/// `p` can't hold beside `fixed`: it is, or conjoins, an atom on a
-/// variable `fixed` limits to values none of which satisfy it.
+/// `p` can't hold beside `fixed`: it is, or conjoins, an atom no value
+/// satisfies together with the atoms `fixed` holds on its variable. The
+/// candidates are missing, each literal those atoms compare with, and its
+/// neighbours, which between them fall in every interval and list the
+/// comparisons carve out.
 fn contradicts(p: &Pred, fixed: &[Atom]) -> bool {
     match p {
-        Pred::Atom(a) if !a.is_array => fixed.iter().any(|f| {
-            f.var == a.var
-                && f.values
-                    .iter()
-                    .all(|v| holds(a.op, v, &a.values) == Some(false))
-        }),
+        Pred::Atom(a) if !a.is_array => {
+            let on: Vec<&Atom> = fixed
+                .iter()
+                .filter(|f| f.var == a.var && !f.is_array)
+                .chain(std::iter::once(a))
+                .collect();
+            if on.len() == 1 {
+                return false;
+            }
+            let mut pool = vec![Value::Missing];
+            for v in on.iter().flat_map(|x| &x.values) {
+                pool.extend([v.clone(), bump(v.clone(), -1), bump(v.clone(), 1)]);
+            }
+            !pool
+                .iter()
+                .any(|v| on.iter().all(|x| holds(x.op, v, &x.values) != Some(false)))
+        }
         Pred::And(c) => c.iter().any(|p| contradicts(p, fixed)),
         _ => false,
+    }
+}
+
+/// The atoms conjunction `p` commits to, appended to `out`.
+fn conjunct_atoms(p: &Pred, out: &mut Vec<Atom>) {
+    match p {
+        Pred::Atom(a) if !a.is_array => out.push(a.clone()),
+        Pred::And(c) => c.iter().for_each(|p| conjunct_atoms(p, out)),
+        _ => {}
     }
 }
 
@@ -1560,9 +1593,27 @@ fn listed_values(var: &str, conds: &[Pred]) -> Option<Vec<f64>> {
 
 /// `c` as a plain conjunction: a random choice of terms whose steps bring
 /// the base to a total the comparison accepts, the others negated.
-/// [`Pred::Tautology`] when no choice does.
-fn pick_count(c: &CountAtom, rng: &mut Rng) -> Pred {
-    let reachable = count_reachable(c);
+/// Steps `fixed` rules in or out are taken or skipped as it says, when
+/// some total is still accepted that way. [`Pred::Tautology`] when no
+/// choice does.
+fn pick_count(c: &CountAtom, fixed: &[Atom], rng: &mut Rng) -> Pred {
+    let take: Vec<bool> = c
+        .terms
+        .iter()
+        .map(|(p, _)| !contradicts(&positive(p), fixed))
+        .collect();
+    let skip: Vec<bool> = c
+        .terms
+        .iter()
+        .map(|(p, _)| !contradicts(&negate(step_condition(p)), fixed))
+        .collect();
+    let bound = count_reachable_within(c, &take, &skip);
+    let (reachable, take, skip) = if bound.last().unwrap().iter().any(|&t| count_accepts(c, t)) {
+        (bound, take, skip)
+    } else {
+        let all = vec![true; c.terms.len()];
+        (count_reachable(c), all.clone(), all)
+    };
     let goals: Vec<i64> = reachable
         .last()
         .unwrap()
@@ -1576,8 +1627,8 @@ fn pick_count(c: &CountAtom, rng: &mut Rng) -> Pred {
     let mut need = goal;
     let mut picks = Vec::with_capacity(c.terms.len());
     for (j, (p, k)) in c.terms.iter().enumerate().rev() {
-        let take = reachable[j].contains(&(need - milli(*k)));
-        let skip = reachable[j].contains(&need);
+        let take = take[j] && reachable[j].contains(&(need - milli(*k)));
+        let skip = skip[j] && reachable[j].contains(&need);
         if take && (!skip || rng.below(2) == 0) {
             need -= milli(*k);
             picks.push(positive(p));
@@ -1597,10 +1648,25 @@ fn milli(x: f64) -> i64 {
 /// The totals `c` can reach after each prefix of its terms, in
 /// thousandths: element `j` holds those of the first `j` terms.
 fn count_reachable(c: &CountAtom) -> Vec<BTreeSet<i64>> {
+    let all = vec![true; c.terms.len()];
+    count_reachable_within(c, &all, &all)
+}
+
+/// [`count_reachable`] when term `j` may be taken only if `take[j]` and
+/// skipped only if `skip[j]`.
+fn count_reachable_within(c: &CountAtom, take: &[bool], skip: &[bool]) -> Vec<BTreeSet<i64>> {
     let mut reachable = vec![BTreeSet::from([milli(c.base)])];
-    for (_, k) in &c.terms {
+    for (j, (_, k)) in c.terms.iter().enumerate() {
         let prev = reachable.last().unwrap();
-        let next = prev.iter().flat_map(|&t| [t, t + milli(*k)]).collect();
+        let mut next = BTreeSet::new();
+        for &t in prev {
+            if skip[j] {
+                next.insert(t);
+            }
+            if take[j] {
+                next.insert(t + milli(*k));
+            }
+        }
         reachable.push(next);
     }
     reachable
@@ -3172,7 +3238,17 @@ fn satisfy(node: &Pred, row: &mut Row, g: &Graph, rng: &mut Rng) -> HashSet<Stri
         Pred::Sum(s) => satisfy_sum(s, row, g, rng),
         Pred::Cmp(c) => satisfy_cmp(c, row, g, rng),
         Pred::Count(c) => {
-            let need = pick_disjuncts(&pick_count(c, rng), rng);
+            // Cells already pinned decide steps that test them.
+            let pinned: Vec<Atom> = row
+                .iter()
+                .map(|(var, v)| Atom {
+                    var: var.clone(),
+                    op: Op::Eq,
+                    values: vec![v.clone()],
+                    is_array: false,
+                })
+                .collect();
+            let need = pick_within(&pick_count(c, &pinned, rng), &pinned, rng);
             centred.extend(satisfy(&need, row, g, rng));
         }
         Pred::And(c) => {
@@ -4152,6 +4228,35 @@ mod tests {
         let leaf = &g.branches[1].leaf;
         assert_eq!(eval(leaf, &row(1, 0), &g, None), Some(true));
         assert_eq!(eval(leaf, &row(1, 1), &g, None), Some(false));
+    }
+
+    #[test]
+    fn count_picks_follow_atoms_already_fixed() {
+        let eq1 = |var: &str| {
+            Pred::Atom(Atom {
+                var: var.to_string(),
+                op: Op::Eq,
+                values: vec![Value::Int(1)],
+                is_array: false,
+            })
+        };
+        let count = CountAtom {
+            base: 0.0,
+            terms: vec![(eq1("a"), 1.0), (eq1("b"), 1.0)],
+            op: Op::Eq,
+            values: vec![Value::Int(1)],
+        };
+        let Pred::Atom(fixed) = eq1("a") else {
+            unreachable!()
+        };
+        for seed in 0..32 {
+            let picked = pick_count(&count, &[fixed.clone()], &mut Rng::new(seed));
+            let Pred::And(c) = &picked else {
+                panic!("{picked:?}")
+            };
+            assert_eq!(c[0], eq1("a"), "seed {seed}");
+            assert_eq!(c[1], negate(&eq1("b")), "seed {seed}");
+        }
     }
 
     #[test]
