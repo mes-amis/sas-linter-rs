@@ -60,6 +60,7 @@ const PAIRS: &[(&str, &str)] = &[
     ),
     ("orphan_format_range", "orphan_format_range"),
     ("statement_not_valid", "statement_not_valid"),
+    ("unescaped_quote_in_string", "unescaped_quote_in_string"),
     ("undefined_format", "undefined_format"),
     ("unreachable_else_if_branch", "unreachable_else_if_branch"),
     (

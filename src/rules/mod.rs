@@ -25,6 +25,7 @@ pub mod tab_expansion;
 pub mod trailing_whitespace;
 pub mod unbalanced_do_block;
 pub mod undefined_format;
+pub mod unescaped_quote_in_string;
 pub mod unreachable_else_if_branch;
 pub mod unreachable_inner_branch_value;
 pub mod unterminated_comment;
@@ -68,6 +69,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         undefined_format::meta(),
         orphan_format_range::meta(),
         statement_not_valid::meta(),
+        unescaped_quote_in_string::meta(),
     ]
 }
 
@@ -81,9 +83,12 @@ pub const AUTOFIX_ORDER: &[&str] = &[
     "line_endings",
     "tab_expansion",
     "trailing_whitespace",
-    // 2. Comment boundaries: what is comment and what is code. Headers are
-    //    rewrapped first; terminating an assignment can leave a comment
-    //    that swallows the next line, which `unterminated_comment` closes.
+    // 2. String and comment boundaries: what is string, comment and code.
+    //    A runaway string can swallow `;` and comments, so strings go
+    //    first. Headers are rewrapped next; terminating an assignment can
+    //    leave a comment that swallows the next line, which
+    //    `unterminated_comment` closes.
+    "unescaped_quote_in_string",
     "source_headers",
     "missing_assignment_semicolon",
     "unterminated_comment",
@@ -106,6 +111,16 @@ pub const REPORT_PRECEDENCE: &[(&str, &[&str])] = &[
     (
         "source_headers",
         &[
+            "statement_not_valid",
+            "malformed_if_condition",
+            "inconsistent_variable_case",
+        ],
+    ),
+    // The text after an early-closing quote reads as stray code.
+    (
+        "unescaped_quote_in_string",
+        &[
+            "malformed_label_statement",
             "statement_not_valid",
             "malformed_if_condition",
             "inconsistent_variable_case",
