@@ -249,6 +249,13 @@ rules:
     enabled: true
     autofix: false             # join the space-separated words with `_`
 
+  malformed_label_statement:
+    enabled: true
+    autofix: false             # insert the missing `=` / terminating `;`
+
+  unbalanced_do_block:
+    enabled: true              # report-only; skipped on files with %do or proc sql select
+
   unterminated_comment:
     enabled: true
     autofix: false             # end the comment on its first line when the next line is the swallowed code
