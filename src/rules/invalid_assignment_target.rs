@@ -143,7 +143,7 @@ fn joined_name(run: &[&Token]) -> String {
 /// token is a plain `Identifier` can only be an assignment, a sum
 /// statement, or one of the few keyword statements the lexer doesn't
 /// special-case (see `STATEMENT_HEAD_IDENTS`).
-fn offenders(tokens: &[Token]) -> Vec<Vec<&Token>> {
+pub(crate) fn offenders(tokens: &[Token]) -> Vec<Vec<&Token>> {
     let mut out = Vec::new();
     let mut in_data_step = false;
     let mut stmt_start = true;

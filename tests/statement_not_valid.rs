@@ -80,6 +80,13 @@ fn a_multi_word_assignment_target_is_left_to_invalid_assignment_target() {
 }
 
 #[test]
+fn a_multi_word_assignment_target_in_open_code_is_flagged() {
+    // `invalid_assignment_target` only reports inside data steps.
+    let src = "Predicted risk = 1;\ndata foo;\nrun;\n";
+    assert_eq!(positions(src), vec![(1, 1)]);
+}
+
+#[test]
 fn statements_with_macro_code_are_not_checked() {
     let src = "data foo;\n&var = 1;\n%if &x %then %do; y = 1; %end;\nrun;\n";
     assert!(findings(src).is_empty(), "{:?}", findings(src));

@@ -1,10 +1,12 @@
+use std::collections::HashSet;
+
 use sas_lexer::TokenType;
 
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::Token;
 
-use super::RuleMeta;
+use super::{invalid_assignment_target, RuleMeta};
 
 pub struct StatementNotValid;
 
@@ -107,6 +109,12 @@ impl Rule for StatementNotValid {
             Some(t) if t.token_type == TokenType::EOF => &tokens[..tokens.len() - 1],
             _ => tokens,
         };
+        // Statements `invalid_assignment_target` reports, keyed by the
+        // first token's offset; it knows the fix.
+        let multi_word_targets: HashSet<u32> = invalid_assignment_target::offenders(tokens)
+            .iter()
+            .map(|run| run[0].start_byte)
+            .collect();
         for stmt in tokens.split(|t| t.token_type == TokenType::SEMI) {
             let Some(first) = stmt.first() else {
                 continue;
@@ -132,6 +140,7 @@ impl Rule for StatementNotValid {
             if matches!(scope, Scope::Proc { .. })
                 || stmt.iter().any(is_macro)
                 || starts_validly(stmt)
+                || multi_word_targets.contains(&first.start_byte)
             {
                 continue;
             }
@@ -186,20 +195,10 @@ fn starts_validly(stmt: &[Token]) -> bool {
                 }
                 _ => false,
             };
-            shaped || is_statement_word(&first.text) || is_multi_word_target(stmt)
+            shaped || is_statement_word(&first.text)
         }
         _ => false,
     }
-}
-
-/// `Predicted risk = …` — reported by `invalid_assignment_target`, which
-/// knows the fix.
-fn is_multi_word_target(stmt: &[Token]) -> bool {
-    let words = stmt
-        .iter()
-        .take_while(|t| t.token_type == TokenType::Identifier)
-        .count();
-    words >= 2 && stmt.get(words).map(|t| t.token_type) == Some(TokenType::ASSIGN)
 }
 
 fn is_statement_word(text: &str) -> bool {
