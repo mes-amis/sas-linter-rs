@@ -4,6 +4,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::Token;
 
+use super::sas::{is_statement_word, RUN_GROUP_PROCS};
 use super::RuleMeta;
 
 pub struct StatementNotValid;
@@ -23,58 +24,6 @@ pub fn meta() -> RuleMeta {
         config_factory: |_| Ok(Box::new(StatementNotValid)),
     }
 }
-
-/// Statement names the lexer emits as plain identifiers rather than `Kw*`
-/// tokens.
-const STATEMENT_WORDS: &[&str] = &[
-    "abort",
-    "catname",
-    "cards",
-    "continue",
-    "datalines",
-    "dcl",
-    "display",
-    "dm",
-    "endrsubmit",
-    "endsas",
-    "error",
-    "file",
-    "go",
-    "goptions",
-    "goto",
-    "infile",
-    "leave",
-    "lines",
-    "link",
-    "lock",
-    "lostcard",
-    "modify",
-    "ods",
-    "options",
-    "otherwise",
-    "page",
-    "putlog",
-    "redirect",
-    "remove",
-    "replace",
-    "resetline",
-    "retain",
-    "return",
-    "rsubmit",
-    "sasfile",
-    "signoff",
-    "signon",
-    "skip",
-    "sysecho",
-    "systask",
-    "waitfor",
-    "window",
-    "x",
-];
-
-/// Statements that also take a number suffix: `title2`, `symbol1`, ….
-const NUMBERED_STATEMENT_WORDS: &[&str] =
-    &["axis", "footnote", "legend", "pattern", "symbol", "title"];
 
 /// Keyword tokens a data-step or global statement can start with. The
 /// lexer also has keyword types for SQL and option words (`from`, `as`,
@@ -116,12 +65,6 @@ const STATEMENT_KEYWORDS: &[TokenType] = &[
     TokenType::KwUpdate,
     TokenType::KwWhen,
     TokenType::KwWhere,
-];
-
-/// PROCs that keep accepting statements after `run;` until `quit;`.
-const RUN_GROUP_PROCS: &[&str] = &[
-    "anova", "arima", "catalog", "datasets", "ds2", "fedsql", "gchart", "glm", "gmap", "gplot",
-    "iml", "optmodel", "plm", "plot", "reg", "sql",
 ];
 
 /// Where a statement sits: PROC bodies have per-PROC statements and aren't
@@ -231,16 +174,6 @@ pub(crate) fn starts_validly(stmt: &[Token]) -> bool {
         }
         _ => false,
     }
-}
-
-/// A statement name the lexer leaves as a plain identifier.
-pub(crate) fn is_statement_word(text: &str) -> bool {
-    let word = text.to_lowercase();
-    if STATEMENT_WORDS.contains(&word.as_str()) {
-        return true;
-    }
-    let base = word.trim_end_matches(|c: char| c.is_ascii_digit());
-    NUMBERED_STATEMENT_WORDS.contains(&base)
 }
 
 /// The statement's text on its first line, shortened for the message.

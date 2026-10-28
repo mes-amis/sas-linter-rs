@@ -6,6 +6,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::Token;
 
+use super::sas::FORMAT_DEFINITIONS;
 use super::RuleMeta;
 
 pub struct UndefinedFormat;
@@ -142,10 +143,7 @@ fn defined_formats(tokens: &[Token]) -> HashSet<String> {
         }
         if !in_proc_format
             || first.token_type != TokenType::Identifier
-            || !matches!(
-                first.text.to_lowercase().as_str(),
-                "value" | "invalue" | "picture"
-            )
+            || !FORMAT_DEFINITIONS.contains(&first.text.to_lowercase().as_str())
         {
             continue;
         }

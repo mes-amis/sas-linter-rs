@@ -4,6 +4,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
+use super::sas::FORMAT_DEFINITIONS;
 use super::RuleMeta;
 
 pub struct ProcStatementMissingSemicolon {
@@ -32,7 +33,7 @@ pub fn meta() -> RuleMeta {
 /// Per PROC, the statement keywords that can't be options of the PROC
 /// statement itself — seeing one before the `;` means the `;` is missing.
 const PROC_STATEMENTS: &[(&str, &[&str])] = &[
-    ("format", &["value", "invalue", "picture"]),
+    ("format", FORMAT_DEFINITIONS),
     ("sort", &["by"]),
     ("freq", &["tables", "table"]),
     ("means", &["var", "class"]),

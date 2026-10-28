@@ -20,6 +20,7 @@ pub mod malformed_label_statement;
 pub mod missing_assignment_semicolon;
 pub mod orphan_format_range;
 pub mod proc_statement_missing_semicolon;
+pub mod sas;
 pub mod source_headers;
 pub mod statement_not_valid;
 pub mod tab_expansion;

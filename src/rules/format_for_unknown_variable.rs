@@ -6,6 +6,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::Token;
 
+use super::sas::{FORMAT_STATEMENTS, RUN_GROUP_PROCS};
 use super::RuleMeta;
 
 pub struct FormatForUnknownVariable;
@@ -90,12 +91,6 @@ fn reads_external_input(stmt: &[Token]) -> bool {
                 || stmt[j - 1].text.eq_ignore_ascii_case("otherwise"))
     })
 }
-
-/// PROCs that keep running past `run;` until `quit;` (or the next step).
-const RUN_GROUP_PROCS: &[&str] = &["datasets", "ds2", "iml", "optmodel", "sql"];
-
-/// Every statement PROC FORMAT accepts after the PROC statement itself.
-const FORMAT_STATEMENTS: &[&str] = &["value", "invalue", "picture", "select", "exclude"];
 
 fn is_declaration_opener(t: &Token) -> bool {
     matches!(

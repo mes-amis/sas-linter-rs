@@ -4,7 +4,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
-use super::{statement_not_valid, RuleMeta};
+use super::{sas, RuleMeta};
 
 pub struct InvalidAssignmentTarget {
     autofix: bool,
@@ -110,7 +110,7 @@ fn joined_name(run: &[&Token]) -> String {
 /// (`drop`, `label`, `rename`, `format`, ...), so a statement whose first
 /// token is a plain `Identifier` can only be an assignment, a sum
 /// statement, or one of the few keyword statements the lexer doesn't
-/// special-case (`statement_not_valid::is_statement_word`).
+/// special-case (`sas::is_statement_word`).
 fn offenders(tokens: &[Token]) -> Vec<Vec<&Token>> {
     let mut out = Vec::new();
     let mut in_data_step = false;
@@ -138,7 +138,7 @@ fn offenders(tokens: &[Token]) -> Vec<Vec<&Token>> {
                     // A statement the lexer leaves as identifiers, whose
                     // options look like `IDENT IDENT = value` (`file log
                     // linesize = 80;`, `title1 j = c "x";`).
-                    let head_is_keyword = statement_not_valid::is_statement_word(&run[0].text);
+                    let head_is_keyword = sas::is_statement_word(&run[0].text);
                     if run.len() >= 2
                         && !head_is_keyword
                         && tokens.get(j).map(|n| n.token_type) == Some(TokenType::ASSIGN)

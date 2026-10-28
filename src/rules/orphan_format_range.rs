@@ -4,6 +4,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
+use super::sas::FORMAT_DEFINITIONS;
 use super::RuleMeta;
 
 pub struct OrphanFormatRange {
@@ -135,9 +136,7 @@ fn orphans(tokens: &[Token]) -> Vec<Orphan<'_>> {
 fn definition_header(stmt: &[Token]) -> Option<String> {
     let kw = stmt.first()?;
     let kw_lower = kw.text.to_lowercase();
-    if kw.token_type != TokenType::Identifier
-        || !matches!(kw_lower.as_str(), "value" | "invalue" | "picture")
-    {
+    if kw.token_type != TokenType::Identifier || !FORMAT_DEFINITIONS.contains(&kw_lower.as_str()) {
         return None;
     }
     let mut name = String::new();

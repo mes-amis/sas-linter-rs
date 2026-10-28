@@ -6,6 +6,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
+use super::sas::{FORMAT_STATEMENTS, RUN_GROUP_PROCS};
 use super::RuleMeta;
 
 pub struct InconsistentVariableCase {
@@ -144,12 +145,6 @@ const VARIABLE_STATEMENTS: &[&str] = &[
     "array", "attrib", "by", "call", "do", "drop", "format", "informat", "input", "keep", "label",
     "length", "put", "putlog", "rename", "retain", "select", "where",
 ];
-
-/// PROCs that keep running past `run;` until `quit;` (or the next step).
-const RUN_GROUP_PROCS: &[&str] = &["datasets", "ds2", "iml", "optmodel", "sql"];
-
-/// Every statement PROC FORMAT accepts after the PROC statement itself.
-const FORMAT_STATEMENTS: &[&str] = &["value", "invalue", "picture", "select", "exclude"];
 
 /// Words the lexer leaves as identifiers inside variable statements without
 /// them naming a variable: `sum(of a b)`, `do over arr`, `array t{3}
