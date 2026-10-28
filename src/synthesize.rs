@@ -4250,7 +4250,7 @@ mod tests {
             unreachable!()
         };
         for seed in 0..32 {
-            let picked = pick_count(&count, &[fixed.clone()], &mut Rng::new(seed));
+            let picked = pick_count(&count, std::slice::from_ref(&fixed), &mut Rng::new(seed));
             let Pred::And(c) = &picked else {
                 panic!("{picked:?}")
             };
