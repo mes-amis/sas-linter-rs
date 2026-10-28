@@ -891,6 +891,7 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
         })
         .collect();
     let mut derived = derived_definitions(defs, &computed, &self_declared);
+    flatten_linear(&mut derived);
     linear_values(&mut derived, specs);
     for p in predicates.iter_mut() {
         *p = substitute_derived(p, &derived, DERIVED_DEPTH);
@@ -936,7 +937,13 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
             values: vec![value.clone()],
             is_array: false,
         });
-        let need = substitute_derived(&atom, &derived, DERIVED_DEPTH);
+        let need = substitute_within(
+            &atom,
+            &derived,
+            DERIVED_DEPTH,
+            &mut HashMap::new(),
+            OUTCOME_BUDGET,
+        );
         if need != atom && references_input(&need, &input_set, &arrays) {
             outcomes.push(Outcome { var, value, need });
         }
@@ -1233,6 +1240,59 @@ fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
     }
 }
 
+/// Inline into each [`DefValue::Linear`] the terms of a term variable that
+/// is itself only ever a linear sum, assigned under the same conditions
+/// (or fewer): `s2 = s1 + e;` after `s1 = a + b;` becomes `s2 = a + b + e`.
+/// Sums of sums then stay one flat sum instead of rewriting each level
+/// inside the next.
+fn flatten_linear(derived: &mut HashMap<String, Vec<Def>>) {
+    for _ in 0..DERIVED_DEPTH {
+        let mut changed = false;
+        let vars: Vec<String> = derived.keys().cloned().collect();
+        for var in vars {
+            for i in 0..derived[&var].len() {
+                let DefValue::Linear(base, terms) = &derived[&var][i].value else {
+                    continue;
+                };
+                let cond = &derived[&var][i].cond;
+                let mut new_base = *base;
+                let mut new_terms = Vec::with_capacity(terms.len());
+                let mut inlined = false;
+                for t in terms {
+                    let inner = (t.test.is_none() && t.max_of.is_empty() && t.var != var)
+                        .then(|| derived.get(&t.var))
+                        .flatten()
+                        .and_then(|defs| match &defs[..] {
+                            [d] if cond.starts_with(&d.cond) => match &d.value {
+                                DefValue::Linear(b, ts) => Some((*b, ts.clone())),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                    match inner {
+                        Some((b, ts)) => {
+                            new_base += b * t.coeff;
+                            new_terms.extend(ts.into_iter().map(|mut u| {
+                                u.coeff *= t.coeff;
+                                u
+                            }));
+                            inlined = true;
+                        }
+                        None => new_terms.push(t.clone()),
+                    }
+                }
+                if inlined {
+                    derived.get_mut(&var).unwrap()[i].value = DefValue::Linear(new_base, new_terms);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// The values `var` can take where `cond` holds: those `cond` lists, its
 /// catalog spec's, or a derived variable's ([`derived_values`]).
 fn term_values(
@@ -1413,11 +1473,28 @@ fn substitute_derived(node: &Pred, derived: &HashMap<String, Vec<Def>>, depth: u
     substitute_cached(node, derived, depth, &mut HashMap::new())
 }
 
+/// Largest rewrite of the atom a value target (`x = 3`) asks for. Each
+/// target is rewritten once, on its own, so it can be larger than the
+/// conditions [`DERIVED_BUDGET`] bounds, which the sampler meets again and
+/// again inside other conditions.
+const OUTCOME_BUDGET: usize = 4 * DERIVED_BUDGET;
+
 fn substitute_cached(
     node: &Pred,
     derived: &HashMap<String, Vec<Def>>,
     depth: usize,
     cache: &mut HashMap<String, Pred>,
+) -> Pred {
+    substitute_within(node, derived, depth, cache, DERIVED_BUDGET)
+}
+
+/// [`substitute_cached`] with `budget` for the atom `node` itself.
+fn substitute_within(
+    node: &Pred,
+    derived: &HashMap<String, Vec<Def>>,
+    depth: usize,
+    cache: &mut HashMap<String, Pred>,
+    budget: usize,
 ) -> Pred {
     if depth == 0 {
         return node.clone();
@@ -1452,7 +1529,7 @@ fn substitute_cached(
                 .any(|d| matches!(d.value, DefValue::Add(_) | DefValue::AddVar(..)))
             {
                 let out = substitute_counter(a, defs, derived, depth, cache)
-                    .filter(|p| pred_size(p) <= DERIVED_BUDGET)
+                    .filter(|p| pred_size(p) <= budget)
                     .unwrap_or_else(|| node.clone());
                 cache.insert(key, out.clone());
                 return out;
@@ -1733,7 +1810,7 @@ fn substitute_cached(
                 1 => alts.pop().unwrap(),
                 _ => Pred::Or(alts),
             };
-            let out = if pred_size(&out) > DERIVED_BUDGET {
+            let out = if pred_size(&out) > budget {
                 node.clone()
             } else {
                 out
