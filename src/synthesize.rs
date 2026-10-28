@@ -2138,6 +2138,31 @@ impl Walker<'_> {
                 } else if !noop {
                     self.computed.insert(var);
                 }
+            } else if statement_start
+                && is(tokens, i, TokenType::Identifier)
+                && is(tokens, i + 1, TokenType::PLUS)
+            {
+                // A sum statement, `x + k;`. SAS starts `x` at 0, keeps it
+                // from row to row and adds a missing `k` as 0, but as a
+                // step after the counter is reset it is `x = x + k;`.
+                let var = tokens[i].text.clone();
+                let end = statement_end(tokens, i);
+                match counter_step(&var, &tokens[i..end]) {
+                    Some(step) => {
+                        let value = match step {
+                            Step::By(k) => DefValue::Add(k),
+                            Step::ByVar(y) => DefValue::AddVar(resolve_alias(self.aliases, y)),
+                        };
+                        let cond = then_arm
+                            .clone()
+                            .or_else(|| arm.clone())
+                            .unwrap_or_else(|| reach.clone());
+                        self.defs.push(Def { var, value, cond });
+                    }
+                    None => {
+                        self.computed.insert(var);
+                    }
+                }
             }
             match tokens[i].token_type {
                 TokenType::KwIf => {
@@ -4127,6 +4152,21 @@ mod tests {
         let leaf = &g.branches[1].leaf;
         assert_eq!(eval(leaf, &row(1, 0), &g, None), Some(true));
         assert_eq!(eval(leaf, &row(1, 1), &g, None), Some(false));
+    }
+
+    #[test]
+    fn sum_statements_step_counters() {
+        // Columns are a, b.
+        let (rows, cov) = minimal_rows(
+            "n = 0;\n\
+             if a in (4,5) then n + 1;\n\
+             if b = 2 then n + 2;\n\
+             if n >= 3 then hi = 1; else hi = 0;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        assert!(rows
+            .iter()
+            .any(|r| ["4", "5"].contains(&r[0].as_str()) && r[1] == "2"));
     }
 
     #[test]

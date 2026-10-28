@@ -178,8 +178,8 @@ variables and constants (`n = 7 - (a + b);`, or of comparisons,
 variable's guard or catalog spec lists, and is missing when any variable
 is; `n = sum(a, b);` skips missing arguments and is missing only when all
 are. `x not in (…)` and `x not eq k` are the negated comparisons. A counter (`n = 0;` then
-`if c then n = n + 1;`, or `n = n + x` by a variable whose guard lists its
-values) is rewritten as a count of the steps whose conditions hold, so
+`if c then n = n + 1;` or the sum statement `if c then n + 1;`, or
+`n = n + x` by a variable whose guard lists its values) is rewritten as a count of the steps whose conditions hold, so
 `n ge 2` becomes "at least two of those conditions". A declared input
 (`x = x;`) that the source also assigns keeps its input value unless one
 of those assignments runs.
