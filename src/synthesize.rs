@@ -1119,7 +1119,7 @@ fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
     let mut unmodelled = Vec::new();
     for (var, defs) in derived.iter() {
         for (i, d) in defs.iter().enumerate() {
-            let DefValue::Linear(_, terms) = &d.value else {
+            let (DefValue::Linear(_, terms) | DefValue::Sum(terms)) = &d.value else {
                 continue;
             };
             let values: Option<Vec<Vec<f64>>> = terms
@@ -1140,7 +1140,7 @@ fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
         }
     }
     for ((var, i), values) in filled {
-        if let Some(DefValue::Linear(_, terms)) =
+        if let Some(DefValue::Linear(_, terms) | DefValue::Sum(terms)) =
             derived.get_mut(&var).map(|defs| &mut defs[i].value)
         {
             for (t, v) in terms.iter_mut().zip(values) {
@@ -1246,7 +1246,14 @@ fn substitute_cached(
                     // The constant plus one count term per value of each
                     // variable, with every variable at one of its values;
                     // or, when the atom accepts missing, any one missing.
-                    DefValue::Linear(base, terms) => {
+                    // `sum()` lets each variable be missing too, as long
+                    // as one isn't, and is missing when all are.
+                    DefValue::Linear(..) | DefValue::Sum(_) => {
+                        let (base, terms, skips) = match &d.value {
+                            DefValue::Linear(base, terms) => (*base, terms, false),
+                            DefValue::Sum(terms) => (0.0, terms, true),
+                            _ => unreachable!(),
+                        };
                         let is = |var: &str, op: Op, values: Vec<Value>| {
                             Pred::Atom(Atom {
                                 var: var.to_string(),
@@ -1255,11 +1262,27 @@ fn substitute_cached(
                                 is_array: false,
                             })
                         };
-                        let numbers = |vs: &[f64]| vs.iter().map(|&v| Value::number(v)).collect();
+                        let numbers = |vs: &[f64]| {
+                            let mut out: Vec<Value> =
+                                vs.iter().map(|&v| Value::number(v)).collect();
+                            if skips {
+                                out.push(Value::Missing);
+                            }
+                            out
+                        };
                         let vars = || terms.iter().filter(|t| t.test.is_none());
                         let mut all: Vec<Pred> = vars()
                             .map(|t| recur(&is(&t.var, Op::In, numbers(&t.values)), cache))
                             .collect();
+                        if skips {
+                            all.push(Pred::Or(
+                                vars()
+                                    .map(|t| {
+                                        recur(&is(&t.var, Op::Ne, vec![Value::Missing]), cache)
+                                    })
+                                    .collect(),
+                            ));
+                        }
                         let tests: Vec<(Pred, f64)> = terms
                             .iter()
                             .filter_map(|t| Some((recur(t.test.as_ref()?, cache), t.coeff)))
@@ -1274,18 +1297,20 @@ fn substitute_cached(
                             .chain(tests)
                             .collect();
                         all.push(Pred::Count(CountAtom {
-                            base: *base,
+                            base,
                             terms: steps,
                             op: a.op,
                             values: a.values.clone(),
                         }));
                         let mut any_of = vec![Pred::And(all)];
                         if holds(a.op, &Value::Missing, &a.values) == Some(true) {
-                            any_of.extend(
-                                vars().map(|t| {
-                                    recur(&is(&t.var, Op::Eq, vec![Value::Missing]), cache)
-                                }),
-                            );
+                            let missing = vars()
+                                .map(|t| recur(&is(&t.var, Op::Eq, vec![Value::Missing]), cache));
+                            if skips {
+                                any_of.push(Pred::And(missing.collect()));
+                            } else {
+                                any_of.extend(missing);
+                            }
                         }
                         Some(Pred::Or(any_of))
                     }
@@ -1355,11 +1380,34 @@ fn substitute_cached(
 
 /// Definitions `i` and `j` can't both fire: one is reached only through
 /// a condition the other is reached only through the `else` of, at any
-/// depth of nested `if … then do;` blocks.
+/// depth of nested `if … then do;` blocks, or they need one variable in
+/// lists with no value in common (`a = 0` and `a in (1,2)`).
 fn exclusive(defs: &[Def], i: usize, j: usize) -> bool {
     let negates =
         |a: &[Pred], b: &[Pred]| b.iter().any(|c| matches!(c, Pred::Not(p) if a.contains(p)));
-    negates(&defs[i].cond, &defs[j].cond) || negates(&defs[j].cond, &defs[i].cond)
+    let (li, lj) = (listed_atoms(&defs[i].cond), listed_atoms(&defs[j].cond));
+    let disjoint = li.iter().any(|a| {
+        lj.iter().any(|b| {
+            a.var == b.var
+                && a.values
+                    .iter()
+                    .all(|v| holds(Op::In, v, &b.values) == Some(false))
+        })
+    });
+    disjoint || negates(&defs[i].cond, &defs[j].cond) || negates(&defs[j].cond, &defs[i].cond)
+}
+
+/// The `x in (…)` and `x = k` atoms among `conds` and their conjunctions.
+fn listed_atoms(conds: &[Pred]) -> Vec<&Atom> {
+    let mut out = Vec::new();
+    for c in conds {
+        match c {
+            Pred::Atom(a) if !a.is_array && matches!(a.op, Op::In | Op::Eq) => out.push(a),
+            Pred::And(c) => out.extend(listed_atoms(c)),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// [`substitute_derived`] for an atom on a counter (`X = 0; … if c then
@@ -1495,12 +1543,16 @@ fn counter_values(var: &str, derived: &HashMap<String, Vec<Def>>) -> Option<Vec<
 }
 
 /// The numbers a condition among `conds` limits `var` to (`var in (0,1,2)`
-/// or `var = 3`): the values a step by `var` can add when it runs.
+/// or `var = 3`), leaving out missing: the values a step by `var` can add
+/// when it runs.
 fn listed_values(var: &str, conds: &[Pred]) -> Option<Vec<f64>> {
     conds.iter().find_map(|c| match c {
-        Pred::Atom(a) if a.var == var && !a.is_array && matches!(a.op, Op::In | Op::Eq) => {
-            a.values.iter().map(Value::as_f64).collect()
-        }
+        Pred::Atom(a) if a.var == var && !a.is_array && matches!(a.op, Op::In | Op::Eq) => a
+            .values
+            .iter()
+            .filter(|v| **v != Value::Missing)
+            .map(Value::as_f64)
+            .collect(),
         Pred::And(c) => listed_values(var, c),
         _ => None,
     })
@@ -1771,6 +1823,9 @@ enum DefValue {
     /// coefficient (±1), with the values each variable can take. SAS
     /// arithmetic is missing when any operand is.
     Linear(f64, Vec<LinearTerm>),
+    /// `X = sum(a, b, …)`: like [`DefValue::Linear`], but SAS's `sum`
+    /// skips missing arguments and is missing only when all of them are.
+    Sum(Vec<LinearTerm>),
 }
 
 #[derive(Clone, Debug)]
@@ -1882,6 +1937,29 @@ fn linear_sum(var: &str, rhs: &[Token]) -> Option<(f64, Vec<(Operand, f64)>)> {
     }
     (signs.len() == 1 && !expect_operand && operands > 1 && !terms.is_empty())
         .then_some((base, terms))
+}
+
+/// `sum(a, b, …)` over plain variables, as the variables.
+fn sum_call(rhs: &[Token]) -> Option<Vec<String>> {
+    let [name, open, args @ .., close] = rhs else {
+        return None;
+    };
+    if name.token_type != TokenType::Identifier
+        || !name.text.eq_ignore_ascii_case("sum")
+        || open.token_type != TokenType::LPAREN
+        || close.token_type != TokenType::RPAREN
+    {
+        return None;
+    }
+    let mut vars = Vec::new();
+    for (k, t) in args.iter().enumerate() {
+        match (k % 2, t.token_type) {
+            (0, TokenType::Identifier) => vars.push(t.text.clone()),
+            (1, TokenType::COMMA) => {}
+            _ => return None,
+        }
+    }
+    (!vars.is_empty() && args.len() % 2 == 1).then_some(vars)
 }
 
 /// The index of the `)` closing the `(` at `open` when the tokens between
@@ -2005,6 +2083,20 @@ impl Walker<'_> {
                     step.or_else(|| {
                         scaled_copy(rhs)
                             .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
+                    })
+                    .or_else(|| {
+                        sum_call(rhs).map(|vars| {
+                            DefValue::Sum(
+                                vars.into_iter()
+                                    .map(|v| LinearTerm {
+                                        var: resolve_alias(self.aliases, v),
+                                        coeff: 1.0,
+                                        values: Vec::new(),
+                                        test: None,
+                                    })
+                                    .collect(),
+                            )
+                        })
                     })
                     .or_else(|| {
                         linear_sum(&var, rhs).map(|(base, terms)| {
@@ -2427,10 +2519,23 @@ impl<'a> PredicateParser<'a> {
     }
 
     fn parse_basic_atom(&mut self) -> Option<Pred> {
-        let var = self.t[self.i].text.clone();
         let save = self.i;
-        self.i += 1;
+        let var = self.t[self.i].text.clone();
+        // `x not in (…)`, `x not eq k`: the comparison, negated.
+        let negated = (self.peek_at(self.i + 1, TokenType::KwNOT)
+            || self.peek_at(self.i + 1, TokenType::NOT))
+            && (self.peek_at(self.i + 2, TokenType::KwIN)
+                || ty(self.t, self.i + 2).and_then(cmp_op).is_some());
+        self.i += if negated { 2 } else { 1 };
+        let p = self.parse_comparison(var);
+        if p.is_none() {
+            self.i = save;
+        }
+        p.map(|p| if negated { Pred::Not(Box::new(p)) } else { p })
+    }
 
+    /// The `in (…)` list or comparison after `var`, at the cursor.
+    fn parse_comparison(&mut self, var: String) -> Option<Pred> {
         if self.peek(TokenType::KwIN) && self.peek_at(self.i + 1, TokenType::LPAREN) {
             self.i += 2;
             let values = self.consume_literal_list_until_rparen();
@@ -2456,8 +2561,6 @@ impl<'a> PredicateParser<'a> {
                 return Some(Pred::Cmp(CmpAtom { left, op, right }));
             }
         }
-
-        self.i = save;
         None
     }
 
@@ -3973,6 +4076,63 @@ mod tests {
         );
         assert!(linear_sum("x", &rhs("x + 1;")).is_none());
         assert!(linear_sum("x", &rhs("a;")).is_none());
+    }
+
+    #[test]
+    fn not_in_and_not_eq_are_negated_comparisons() {
+        // Columns are a, b. With `not` parsed, the guard is fully known
+        // and both values are reachable.
+        let (rows, cov) = minimal_rows(
+            "if a not in (5, 6) and b not eq 9 then do;\n\
+               if a = 1 then s = 1; else s = 0;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        let passes = |r: &Vec<String>| !["5", "6"].contains(&r[0].as_str()) && r[1] != "9";
+        assert!(rows.iter().any(|r| passes(r) && r[0] != "1"), "{rows:?}");
+    }
+
+    #[test]
+    fn sum_calls_skip_missing_arguments() {
+        // Columns are a, b. `sum(a, b)` is 0 with one missing and the
+        // other 0, and missing only when both are.
+        let (rows, cov) = minimal_rows(
+            "if a in (.,0,1) and b in (.,0,1) then do;\n\
+               n = sum(a, b);\n\
+               if n = 2 then s = 2; else if n = 1 then s = 1;\n\
+               else if n = 0 then s = 0; else s = 9;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(
+            rows.iter().any(|r| r == &[".", "."] || r == &["", ""]),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn definitions_needing_disjoint_values_are_exclusive() {
+        let atom = |v: Vec<i64>| {
+            Pred::Atom(Atom {
+                var: "a".into(),
+                op: Op::In,
+                values: v.into_iter().map(Value::Int).collect(),
+                is_array: false,
+            })
+        };
+        let def = |cond: Vec<Pred>| Def {
+            var: "x".into(),
+            value: DefValue::Const(Value::Int(1)),
+            cond,
+        };
+        let defs = vec![
+            def(vec![Pred::And(vec![atom(vec![0])])]),
+            def(vec![atom(vec![1, 2])]),
+            def(vec![atom(vec![0, 1])]),
+        ];
+        assert!(exclusive(&defs, 0, 1));
+        assert!(!exclusive(&defs, 0, 2));
+        assert!(!exclusive(&defs, 1, 2));
     }
 
     #[test]
