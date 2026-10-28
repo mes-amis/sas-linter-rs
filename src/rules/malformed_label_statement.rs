@@ -127,7 +127,7 @@ fn label_violations(tokens: &[Token]) -> Vec<(Token, Token)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
-        if tokens[i].token_type != TokenType::KwLabel {
+        if !is_label_statement(tokens, i) {
             i += 1;
             continue;
         }
@@ -176,7 +176,7 @@ fn unterminated_labels(tokens: &[Token]) -> Vec<(Token, Token)> {
     for (j, t) in tokens.iter().enumerate() {
         match t.token_type {
             TokenType::SEMI => in_label = false,
-            TokenType::KwLabel if !in_label => in_label = true,
+            TokenType::KwLabel if is_label_statement(tokens, j) => in_label = true,
             TokenType::StringLiteral if in_label => {
                 let (Some(kw), next) = (tokens.get(j + 1), tokens.get(j + 2)) else {
                     continue;
@@ -209,12 +209,21 @@ fn insert_label_semicolons(source: &str) -> String {
     out
 }
 
+/// A `label` keyword that opens a statement. `label=` options of `attrib`,
+/// SAS/GRAPH `axis` and the like are not `label` statements.
+fn is_label_statement(tokens: &[Token], i: usize) -> bool {
+    tokens[i].token_type == TokenType::KwLabel
+        && (i == 0 || tokens[i - 1].token_type == TokenType::SEMI)
+}
+
+/// The string's first line, cut to 40 characters, for a message.
 fn shorten(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= 40 {
+    let first = text.lines().next().unwrap_or("");
+    let chars: Vec<char> = first.chars().collect();
+    if first.len() == text.len() && chars.len() <= 40 {
         text.to_string()
     } else {
-        let head: String = chars[..37].iter().collect();
+        let head: String = chars.iter().take(37).collect();
         format!("{}...", head)
     }
 }

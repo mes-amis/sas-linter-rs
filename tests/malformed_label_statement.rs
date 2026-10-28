@@ -86,3 +86,21 @@ fn autofix_fixes_both_defects_together() {
     let src = "label a 'A'\nrun;\n";
     assert_eq!(autofix(src), "label a = 'A';\nrun;\n");
 }
+
+#[test]
+fn label_options_of_other_statements_are_not_label_statements() {
+    // SAS/GRAPH `label=(…)` options and ATTRIB's `label=` are options, not
+    // `label` statements.
+    let src = "axis1 label=(f=swiss j=c 'Weight') order=(0 to 10);\n\
+               attrib x label='Lbl' length=8;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+    assert_eq!(autofix(src), src);
+}
+
+#[test]
+fn the_message_quotes_only_the_first_line_of_a_long_string() {
+    let src = "label a 'first line\nsecond line';\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert!(!f[0].message.contains('\n'), "{:?}", f[0].message);
+}
