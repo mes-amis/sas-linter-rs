@@ -89,3 +89,28 @@ fn removing_a_format_is_silent() {
     let src = with_formats("format a;\nattrib b length = 8;");
     assert!(findings(&src).is_empty(), "{:?}", findings(&src));
 }
+
+#[test]
+fn fmtsearch_or_include_in_a_comment_does_not_skip_the_file() {
+    let src = format!(
+        "/* no fmtsearch or %include needed */\n* fmtsearch;\n{}",
+        with_formats("format a other.;")
+    );
+    assert_eq!(findings(&src).len(), 1, "{:?}", findings(&src));
+}
+
+#[test]
+fn an_include_statement_skips_the_file() {
+    let src = format!(
+        "%include 'formats.sas';\n{}",
+        with_formats("format a other.;")
+    );
+    assert!(findings(&src).is_empty(), "{:?}", findings(&src));
+}
+
+#[test]
+fn only_proc_format_defines_formats() {
+    // `value nope` in a data step is not a format definition.
+    let src = with_formats("value nope;\nformat a nope.;");
+    assert_eq!(findings(&src).len(), 1, "{:?}", findings(&src));
+}

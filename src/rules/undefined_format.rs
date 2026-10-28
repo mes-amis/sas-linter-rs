@@ -65,8 +65,10 @@ impl Rule for UndefinedFormat {
         let has_proc_format = tokens.windows(2).any(|w| {
             w[0].token_type == TokenType::KwProc && w[1].token_type == TokenType::KwFormat
         });
-        let lower = ctx.source.to_lowercase();
-        if !has_proc_format || lower.contains("fmtsearch") || lower.contains("%include") {
+        let looks_elsewhere = tokens.iter().any(|t| {
+            t.token_type == TokenType::KwmInclude || t.text.eq_ignore_ascii_case("fmtsearch")
+        });
+        if !has_proc_format || looks_elsewhere {
             return Vec::new();
         }
 
@@ -118,24 +120,40 @@ impl Rule for UndefinedFormat {
     }
 }
 
-/// Names declared by `value` / `invalue` / `picture`, lower-cased, with a
-/// leading `$` for character formats.
+/// Names declared by `value` / `invalue` / `picture` statements inside
+/// PROC FORMAT, lower-cased, with a leading `$` for character formats.
 fn defined_formats(tokens: &[Token]) -> HashSet<String> {
     let mut out = HashSet::new();
-    for (i, t) in tokens.iter().enumerate() {
-        if t.token_type != TokenType::Identifier
+    let mut in_proc_format = false;
+    for stmt in tokens.split(|t| t.token_type == TokenType::SEMI) {
+        let Some(first) = stmt.first() else {
+            continue;
+        };
+        match first.token_type {
+            TokenType::KwProc => {
+                in_proc_format = stmt.get(1).map(|t| t.token_type) == Some(TokenType::KwFormat);
+                continue;
+            }
+            TokenType::KwData | TokenType::KwRun | TokenType::KwQuit => {
+                in_proc_format = false;
+                continue;
+            }
+            _ => {}
+        }
+        if !in_proc_format
+            || first.token_type != TokenType::Identifier
             || !matches!(
-                t.text.to_lowercase().as_str(),
+                first.text.to_lowercase().as_str(),
                 "value" | "invalue" | "picture"
             )
         {
             continue;
         }
-        let (dollar, k) = match tokens.get(i + 1) {
-            Some(d) if d.token_type == TokenType::DOLLAR => ("$", i + 2),
-            _ => ("", i + 1),
+        let (dollar, k) = match stmt.get(1) {
+            Some(d) if d.token_type == TokenType::DOLLAR => ("$", 2),
+            _ => ("", 1),
         };
-        if let Some(name) = tokens
+        if let Some(name) = stmt
             .get(k)
             .filter(|n| n.token_type == TokenType::Identifier)
         {
