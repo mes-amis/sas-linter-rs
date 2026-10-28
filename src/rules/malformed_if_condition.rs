@@ -144,6 +144,9 @@ impl Rule for MalformedIfCondition {
                 i = new_i;
                 continue;
             }
+            if tokens[i].token_type == TokenType::KwWhen {
+                claim_when_then(tokens, i, &mut consumed_thens);
+            }
             if tokens[i].token_type == TokenType::KwThen && !consumed_thens.contains(&i) {
                 let t = &tokens[i];
                 findings.push(Finding {
@@ -159,6 +162,21 @@ impl Rule for MalformedIfCondition {
             i += 1;
         }
         findings
+    }
+}
+
+/// PROC SQL's `case when COND then …` is the other construct with a `then`.
+/// Claim the first `then` after the `when` that no earlier `when` has taken,
+/// so in a nested `case when (case when … then … end) … then` each `when`
+/// owns one `then`. A data-step `select` `when (…) stmt;` has no `then`; the
+/// scan stops at the `;`.
+fn claim_when_then(tokens: &[Token], when: usize, consumed: &mut HashSet<usize>) {
+    for (j, t) in tokens.iter().enumerate().skip(when + 1) {
+        match t.token_type {
+            TokenType::KwThen if consumed.insert(j) => return,
+            TokenType::SEMI => return,
+            _ => {}
+        }
     }
 }
 
@@ -282,6 +300,11 @@ fn analyze_if(
                 i += 1;
                 continue;
             }
+            if let Some(end) = special_missing_end(tokens, i) {
+                state = State::ExpectOperator;
+                i = end;
+                continue;
+            }
             if OPERAND_TOKENS.contains(&ty) {
                 state = State::ExpectOperator;
                 i = operand_end(tokens, i);
@@ -321,7 +344,7 @@ fn analyze_if(
         if is_binop(ty) {
             last_op_tok = Some(t);
             state = State::ExpectOperand;
-            i += 1;
+            i = past_colon_modifier(tokens, i);
             continue;
         }
         // Negated comparisons: `not eq`, `^=`, etc.
@@ -330,7 +353,7 @@ fn analyze_if(
                 if COMPARISON_OPS.contains(&nxt.token_type) {
                     last_op_tok = Some(nxt);
                     state = State::ExpectOperand;
-                    i += 2;
+                    i = past_colon_modifier(tokens, i + 1);
                     continue;
                 }
             }
@@ -357,6 +380,31 @@ fn analyze_if(
     }
 
     (i, findings)
+}
+
+/// Index just past the operator at `op`, including the `:` of a prefix
+/// comparison (`=:`, `eq:`, `in:` — "begins with"), which lexes as a
+/// separate COLON token.
+fn past_colon_modifier(tokens: &[Token], op: usize) -> usize {
+    let is_cmp = COMPARISON_OPS.contains(&tokens[op].token_type);
+    match tokens.get(op + 1) {
+        Some(c) if is_cmp && c.token_type == TokenType::COLON => op + 2,
+        _ => op + 1,
+    }
+}
+
+/// A special missing value `.a`–`.z` / `._` lexes as DOT + a one-character
+/// Identifier with no space between them. Returns the index past it.
+fn special_missing_end(tokens: &[Token], i: usize) -> Option<usize> {
+    let dot = tokens.get(i).filter(|t| t.token_type == TokenType::DOT)?;
+    let letter = tokens.get(i + 1)?;
+    let one_char = letter.text.len() == 1
+        && letter
+            .text
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == '_');
+    (letter.token_type == TokenType::Identifier && letter.start_byte == dot.end_byte && one_char)
+        .then_some(i + 2)
 }
 
 /// Index just past the operand starting at `start`. A string expression
