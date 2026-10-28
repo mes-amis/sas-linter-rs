@@ -56,13 +56,28 @@ impl Linter {
         }
 
         let mut modified = source.to_string();
-        for rule in &self.rules {
-            if rule.autofix_enabled() && rule.supports_autofix() {
-                modified = rule.autofix(&modified);
-            }
+        for rule in self.fixers(|_| true) {
+            modified = rule.autofix(&modified);
         }
 
         (findings, modified)
+    }
+
+    /// Autofix-enabled rules accepted by `filter`, in `AUTOFIX_ORDER`.
+    fn fixers(&self, filter: impl Fn(&dyn Rule) -> bool) -> Vec<&dyn Rule> {
+        let mut fixers: Vec<&dyn Rule> = self
+            .rules
+            .iter()
+            .map(|r| r.as_ref())
+            .filter(|r| r.autofix_enabled() && r.supports_autofix() && filter(*r))
+            .collect();
+        fixers.sort_by_key(|r| {
+            rules::AUTOFIX_ORDER
+                .iter()
+                .position(|id| *id == r.id())
+                .unwrap_or(usize::MAX)
+        });
+        fixers
     }
 
     /// Lint a file by path. Sources are commonly Win-1252 / Latin-1 rather
@@ -89,14 +104,12 @@ impl Linter {
         self.apply_autofixes(&modified, Hook::AfterFormat)
     }
 
-    /// Run autofix-enabled rules attached to `hook`, sequentially in rule
-    /// order.
+    /// Run autofix-enabled rules attached to `hook`, sequentially in
+    /// `AUTOFIX_ORDER`.
     fn apply_autofixes(&self, source: &str, hook: Hook) -> String {
         let mut modified = source.to_string();
-        for rule in &self.rules {
-            if rule.autofix_enabled() && rule.supports_autofix() && rule.hook() == hook {
-                modified = rule.autofix(&modified);
-            }
+        for rule in self.fixers(|r| r.hook() == hook) {
+            modified = rule.autofix(&modified);
         }
         modified
     }

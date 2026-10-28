@@ -71,6 +71,31 @@ pub fn all_metas() -> Vec<RuleMeta> {
     ]
 }
 
+/// The order autofixes run in, whatever order the config lists rules in.
+/// Each phase settles something the next one relies on, so one save
+/// reaches a fixed point:
+pub const AUTOFIX_ORDER: &[&str] = &[
+    // 1. Bytes: encoding, line endings and blanks, so later byte and
+    //    column math sees the final text.
+    "encoding_issues",
+    "line_endings",
+    "tab_expansion",
+    "trailing_whitespace",
+    // 2. Comment boundaries: what is comment and what is code. Headers are
+    //    rewrapped first; terminating an assignment can leave a comment
+    //    that swallows the next line, which `unterminated_comment` closes.
+    "source_headers",
+    "missing_assignment_semicolon",
+    "unterminated_comment",
+    // 3. Statement boundaries inside the code.
+    "proc_statement_missing_semicolon",
+    "malformed_label_statement",
+    "orphan_format_range",
+    // 4. Names, once the code they appear in is final.
+    "invalid_assignment_target",
+    "inconsistent_variable_case",
+];
+
 /// Rule ids folded into another rule, mapped to the id that now covers
 /// them. Configs and `--rules` lists naming a retired id keep working.
 const RETIRED_IDS: &[(&str, &str)] = &[("star_comment_swallows_code", "unterminated_comment")];

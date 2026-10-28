@@ -52,7 +52,7 @@ Retiring or merging a rule id: add it to `RETIRED_IDS` in `src/rules/mod.rs` so 
 
 ### Autofix ordering
 
-Inside `lint_with_fixes`: all rules' `check` runs over the original source first (so findings reflect the pre-fix state); then autofix-enabled rules run **sequentially** over an accumulating string. Order is the rule order in `all_metas()`. If two autofixes interact, that order matters — keep it in mind when adding rewrite rules.
+Inside `lint_with_fixes`: all rules' `check` runs over the original source first (so findings reflect the pre-fix state); then autofix-enabled rules run **sequentially** over an accumulating string, in the order of `AUTOFIX_ORDER` (`src/rules/mod.rs`) — not config order. It is grouped in phases (bytes → comment boundaries → statement boundaries → names) so each fix sees the text earlier phases settled and one save reaches a fixed point; `tests/autofix_order.rs` requires every autofix rule to appear in it exactly once. Place a new rewrite rule in the phase whose output it depends on.
 
 In `--format` mode (`Linter::format_source`) autofixes are split by `Rule::hook()`: `before_format` rules (default for `tab_expansion`, `line_endings`, `encoding_issues`) run before the formatter so its column math sees normalized bytes; everything else runs after. A per-rule `hook:` config key overrides the default (applied via the `HookOverride` wrapper in `src/rules/mod.rs`).
 
