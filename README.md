@@ -316,7 +316,7 @@ rules:
 
   source_headers:
     enabled: true
-    autofix: false             # rewrap **…**; 90-char header rows when true
+    autofix: false             # re-wrap leaked header text as 90-char **…**; rows
 
   line_endings:
     enabled: true
@@ -390,7 +390,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `choose_one_template` | `** CHOOSE ONE OF THE BELOW STATEMENTS;` banner indicating a broken-by-default source. |
 | `trailing_whitespace` | Trailing spaces/tabs at end of line. |
 | `tab_expansion` | Tab characters that should be spaces (configurable width). |
-| `source_headers` | Restore the `**...**;` 90-char header convention to broken sources. |
+| `source_headers` | Header text that leaks out of its `**` comment and runs as code — after a `;` inside the text (`** CHECKED BY: A; B **;` ends at the first `;`), or a continuation line missing its `**` — and header boxes whose missing `;` lets the comment swallow the code after it. Code that merely follows a comment on the same line is left alone. Autofix re-wraps the line as a 90-char `**  …  **;` row, turning `;` inside the text into `,`. |
 | `line_endings` | Mixed or non-CRLF line terminators (configurable target). |
 | `encoding_issues` | Smart-quote / em-dash / Win-1252 byte sequences that confuse downstream tooling. |
 | `malformed_if_condition` | Empty conditions, missing operators, orphan `then`, unbalanced parens, etc. |

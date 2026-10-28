@@ -87,10 +87,10 @@ impl Rule for UnterminatedComment {
 }
 
 /// A `*` comment that ran past its first line and swallowed code.
-struct Swallow<'a> {
-    comment: &'a Token,
+pub(crate) struct Swallow<'a> {
+    pub comment: &'a Token,
     /// 1-based line of the first swallowed line that is a SAS statement.
-    code_line: u32,
+    pub code_line: u32,
     /// Byte range of the first line's trailing blanks — where the `;` goes.
     first_line_blank_tail: (usize, usize),
     /// The code sits right after the first line, so ending the comment
@@ -102,7 +102,7 @@ struct Swallow<'a> {
 /// where a swallowed line starts a SAS statement. A comment that runs to
 /// end of file found no `;`, so nothing it swallowed was a complete
 /// statement.
-fn swallows<'a>(all_tokens: &'a [Token], source: &str) -> Vec<Swallow<'a>> {
+pub(crate) fn swallows<'a>(all_tokens: &'a [Token], source: &str) -> Vec<Swallow<'a>> {
     let mut out = Vec::new();
     for t in all_tokens {
         if t.channel != TokenChannel::COMMENT
