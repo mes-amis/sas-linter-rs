@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sas_lexer::TokenType;
 
@@ -49,10 +49,35 @@ impl Rule for UnreachableInnerBranchValue {
         let mut findings = Vec::new();
         let mut stack: Vec<GuardFrame> = Vec::new();
         let mut do_depth: i32 = 0;
+        let arrays = array_members(tokens);
+        // Index of the next statement's first token.
+        let mut stmt_start = 0;
         let mut i = 0;
 
         while i < tokens.len() {
             let tok = &tokens[i];
+            // A guard says what a variable held when the block was entered.
+            // Once the block writes the variable, the guard no longer
+            // constrains it.
+            if i == stmt_start {
+                match writes(tokens, i, &arrays) {
+                    Some(Writes::Vars(vars)) => stack.retain(|f| !vars.contains(&f.var)),
+                    Some(Writes::Any) => stack.clear(),
+                    None => {}
+                }
+            }
+            match tok.token_type {
+                TokenType::SEMI | TokenType::KwThen | TokenType::KwElse => stmt_start = i + 1,
+                TokenType::Identifier if tok.text.eq_ignore_ascii_case("otherwise") => {
+                    stmt_start = i + 1
+                }
+                TokenType::KwWhen
+                    if tokens.get(i + 1).map(|t| t.token_type) == Some(TokenType::LPAREN) =>
+                {
+                    stmt_start = past_parens(tokens, i + 1)
+                }
+                _ => {}
+            }
             match tok.token_type {
                 TokenType::KwIf => {
                     let (consumed, frames, inner) =
@@ -69,7 +94,16 @@ impl Rule for UnreachableInnerBranchValue {
                     i += 1;
                     continue;
                 }
-                TokenType::KwEnd => {
+                TokenType::KwSelect if opens_select_block(tokens, i) => {
+                    do_depth += 1;
+                    i += 1;
+                    continue;
+                }
+                // A block-closing `end` is the whole statement, `end;`:
+                // `infile … end = eof` and SQL `case … end as x` are not.
+                TokenType::KwEnd
+                    if tokens.get(i + 1).map(|t| t.token_type) == Some(TokenType::SEMI) =>
+                {
                     if do_depth > 0 {
                         do_depth -= 1;
                     }
@@ -90,6 +124,141 @@ impl Rule for UnreachableInnerBranchValue {
         }
         findings
     }
+}
+
+/// Variables a statement may write.
+enum Writes {
+    Vars(Vec<String>),
+    /// Unknown — any variable.
+    Any,
+}
+
+/// The variables the statement starting at `i` writes, if any: the target
+/// of an assignment or sum statement, an iterative `do` index, the
+/// variables of an `input` statement or a `call` routine's arguments, the
+/// members of an array whose element is assigned. `set` / `merge` /
+/// `update` / `modify` may overwrite anything.
+fn writes(
+    tokens: &[Token],
+    i: usize,
+    arrays: &HashMap<String, Option<Vec<String>>>,
+) -> Option<Writes> {
+    let ty = |j: usize| tokens.get(j).map(|t| t.token_type);
+    let t = &tokens[i];
+    let name = |j: usize| tokens[j].text.to_lowercase();
+    let idents_until_semi = |from: usize| {
+        tokens[from.min(tokens.len())..]
+            .iter()
+            .take_while(|t| t.token_type != TokenType::SEMI)
+            .filter(|t| t.token_type == TokenType::Identifier)
+            .map(|t| t.text.to_lowercase())
+            .collect()
+    };
+    match t.token_type {
+        TokenType::Identifier => match ty(i + 1)? {
+            TokenType::ASSIGN | TokenType::PLUS => Some(Writes::Vars(vec![name(i)])),
+            TokenType::LCURLY | TokenType::LPAREN | TokenType::LBRACK
+                if ty(past_parens(tokens, i + 1)) == Some(TokenType::ASSIGN) =>
+            {
+                match arrays.get(&name(i)) {
+                    Some(Some(members)) => Some(Writes::Vars(members.clone())),
+                    _ => Some(Writes::Any),
+                }
+            }
+            _ if t.text.eq_ignore_ascii_case("modify") => Some(Writes::Any),
+            _ => None,
+        },
+        TokenType::KwDo
+            if ty(i + 1) == Some(TokenType::Identifier) && ty(i + 2) == Some(TokenType::ASSIGN) =>
+        {
+            Some(Writes::Vars(vec![name(i + 1)]))
+        }
+        TokenType::KwInput => Some(Writes::Vars(idents_until_semi(i + 1))),
+        // Skip the routine name; every name among the arguments may be set.
+        TokenType::KwCall => Some(Writes::Vars(idents_until_semi(i + 2))),
+        TokenType::KwSet | TokenType::KwMerge | TokenType::KwUpdate => Some(Writes::Any),
+        _ => None,
+    }
+}
+
+/// Every `array NAME{…} members;` in the file, by lowercased name. `None`
+/// when the members can't be listed by name (implicit `NAME1`-`NAMEn`,
+/// `_numeric_`, `x1-x9` ranges); a `_temporary_` array has none.
+fn array_members(tokens: &[Token]) -> HashMap<String, Option<Vec<String>>> {
+    let mut arrays = HashMap::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t.token_type != TokenType::KwArray {
+            continue;
+        }
+        let Some(name) = tokens
+            .get(i + 1)
+            .filter(|t| t.token_type == TokenType::Identifier)
+        else {
+            continue;
+        };
+        let mut members = Some(Vec::new());
+        let mut temporary = false;
+        for m in tokens[past_parens(tokens, i + 2)..]
+            .iter()
+            .take_while(|t| !matches!(t.token_type, TokenType::SEMI | TokenType::LPAREN))
+        {
+            match m.token_type {
+                TokenType::Identifier if m.text.eq_ignore_ascii_case("_temporary_") => {
+                    temporary = true
+                }
+                TokenType::Identifier if m.text.starts_with('_') => members = None,
+                TokenType::Identifier => {
+                    if let Some(v) = members.as_mut() {
+                        v.push(m.text.to_lowercase());
+                    }
+                }
+                TokenType::MINUS | TokenType::COLON => members = None,
+                _ => {}
+            }
+        }
+        if members.as_ref().is_some_and(|v| v.is_empty()) && !temporary {
+            members = None;
+        }
+        arrays.insert(name.text.to_lowercase(), members);
+    }
+    arrays
+}
+
+/// `i` is an opening bracket; return the index just past its match (or the
+/// `;` / EOF that arrives first). Any other token: `i` itself.
+fn past_parens(tokens: &[Token], i: usize) -> usize {
+    let opens = |ty| {
+        matches!(
+            ty,
+            TokenType::LPAREN | TokenType::LCURLY | TokenType::LBRACK
+        )
+    };
+    if !tokens.get(i).is_some_and(|t| opens(t.token_type)) {
+        return i;
+    }
+    let mut depth = 0usize;
+    for (j, t) in tokens.iter().enumerate().skip(i) {
+        match t.token_type {
+            ty if opens(ty) => depth += 1,
+            TokenType::RPAREN | TokenType::RCURLY | TokenType::RBRACK => {
+                depth -= 1;
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            TokenType::SEMI => return j,
+            _ => {}
+        }
+    }
+    tokens.len()
+}
+
+/// Is the `select` at `i` a data-step `select;` / `select (expr);` block,
+/// closed by `end;`? A PROC SQL `select a, …` / `select (a) from …` query
+/// is not.
+fn opens_select_block(tokens: &[Token], i: usize) -> bool {
+    let after = past_parens(tokens, i + 1);
+    tokens.get(after).map(|t| t.token_type) == Some(TokenType::SEMI)
 }
 
 /// Analyse the `if` at `i`. Returns how many tokens to skip (the condition,

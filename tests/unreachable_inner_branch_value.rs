@@ -213,6 +213,109 @@ fn the_guard_is_released_at_its_end() {
     assert!(findings(src).is_empty());
 }
 
+// ── Guards and writes to the guarded variable ────────────────────────────
+
+/// Wrap `body` in a `g in (1,2)` guard, follow it with a test of `g = 11`
+/// and a still-dead `h = 9`, and return the lines reported.
+fn lines_after_write(body: &str) -> Vec<u32> {
+    let src = format!(
+        "array arr{{2}} g k;\n\
+         if g in (1,2) and h in (0) then do;\n\
+         {body}\n\
+         if g = 11 then x = 1;\n\
+         if h = 9 then x = 2;\n\
+         end;\n"
+    );
+    findings(&src).iter().map(|f| f.line).collect()
+}
+
+#[test]
+fn a_write_to_the_variable_releases_its_guard() {
+    for body in [
+        "g = g + 10;",
+        "if z = 1 then g = 11;",
+        "if z = 1 then do; g = 11; end;",
+        "g + 9;",
+        "do g = 1 to 20; end;",
+        "input g 3.;",
+        "call missing(g);",
+        "arr{2} = 11;",
+        "arr(i) = 11;",
+    ] {
+        assert_eq!(lines_after_write(body), vec![5], "{body}");
+    }
+}
+
+#[test]
+fn a_write_to_another_variable_keeps_the_guard() {
+    for body in [
+        "x = g + 10;",
+        "k + 1;",
+        "call missing(k);",
+        "if g = 2 then k = 11;",
+    ] {
+        assert_eq!(lines_after_write(body), vec![4, 5], "{body}");
+    }
+}
+
+#[test]
+fn reading_a_data_set_releases_every_guard() {
+    for body in ["set more;", "merge a b;", "unknown{1} = 11;"] {
+        assert_eq!(lines_after_write(body), Vec::<u32>::new(), "{body}");
+    }
+}
+
+#[test]
+fn tests_before_the_write_are_still_checked() {
+    let src = "if g in (1,2) then do;\n\
+               if g = 3 then x = 1;\n\
+               g = 3;\n\
+               if g = 3 then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(2, 8)]);
+}
+
+// ── Block nesting ────────────────────────────────────────────────────────
+
+#[test]
+fn a_select_block_inside_a_guard_does_not_end_it() {
+    let src = "if g in (1,2) then do;\n\
+               select (k);\n\
+               when (1) x = 1;\n\
+               otherwise x = 2;\n\
+               end;\n\
+               select;\n\
+               when (k = 2) x = 3;\n\
+               end;\n\
+               if g = 3 then x = 4;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(9, 8)]);
+}
+
+#[test]
+fn an_end_option_is_not_a_block_end() {
+    let src = "if g in (1,2) then do;\n\
+               infile src end = done;\n\
+               if g = 3 then x = 1;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 8)]);
+}
+
+#[test]
+fn an_sql_select_does_not_open_a_block() {
+    // Were `select (a) …;` a block, the guard's `end;` would close it and
+    // the guard would leak past its own block.
+    let src = "proc sql;\n\
+               select (a) from t;\n\
+               quit;\n\
+               data u; set t;\n\
+               if g in (1,2) then do;\n\
+               end;\n\
+               if g = 3 then x = 2;\n\
+               run;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
+
 #[test]
 fn a_guard_without_a_do_block_restricts_nothing() {
     let src = "if e in (0,1,2) then x = 1;\n\
