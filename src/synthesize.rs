@@ -1340,6 +1340,53 @@ fn may_be_missing(var: &str, cond: &[Pred]) -> bool {
 /// as one alternative each; beyond it the sum becomes a count.
 const LINEAR_COMBINATIONS: usize = 128;
 
+/// Largest rewrite of a comparison between variables with a derived side
+/// ([`cmp_alternatives`]): one alternative per value of that side, each
+/// carrying the conditions for that value.
+const CMP_BUDGET: usize = 4 * DERIVED_BUDGET;
+
+/// `c` as one alternative per value its derived side (the right one when
+/// `right`) can be given, with the other side compared with a number:
+/// `other - v op k` or `v - other op k`, and without a difference `other
+/// op v` or `v op other`. A difference with a missing side is missing.
+fn cmp_alternatives(
+    c: &CmpAtom,
+    right: bool,
+    derived: &HashMap<String, Vec<Def>>,
+) -> Option<Vec<Pred>> {
+    let (side, other) = if right {
+        (&c.right, &c.left)
+    } else {
+        (&c.left, &c.right)
+    };
+    let values = derived_values(side, derived, &ValueSpecs::default(), DERIVED_DEPTH)?;
+    let atom = |var: &str, op: Op, v: Value| {
+        Pred::Atom(Atom {
+            var: var.to_string(),
+            op,
+            values: vec![v],
+            is_array: false,
+        })
+    };
+    let k = c.diff.unwrap_or(0.0);
+    let mut alts: Vec<Pred> = values
+        .iter()
+        .map(|&v| {
+            let compared = match (right, c.diff.is_some()) {
+                (true, _) => atom(other, c.op, Value::number(v + k)),
+                (false, true) => atom(other, flip(c.op), Value::number(v - k)),
+                (false, false) => atom(other, flip(c.op), Value::number(v)),
+            };
+            Pred::And(vec![atom(side, Op::Eq, Value::number(v)), compared])
+        })
+        .collect();
+    if c.diff.is_some() && holds(c.op, &Value::Missing, &[Value::number(k)]) == Some(true) {
+        alts.push(atom(side, Op::Eq, Value::Missing));
+        alts.push(atom(other, Op::Eq, Value::Missing));
+    }
+    Some(alts)
+}
+
 /// Largest rewritten condition (in predicate nodes) [`substitute_derived`]
 /// will produce for one atom; beyond it the atom stays an unknown. Sources
 /// that assign one variable many times under nested conditions (casemix
@@ -1376,6 +1423,24 @@ fn substitute_cached(
         return node.clone();
     }
     match node {
+        // A comparison with a derived side: one alternative per value that
+        // side can be given, the other side then compared with a number.
+        Pred::Cmp(c) if derived.contains_key(&c.right) || derived.contains_key(&c.left) => {
+            // Either derived side may be enumerated; the smaller rewrite
+            // is kept.
+            let out = [true, false]
+                .into_iter()
+                .filter(|&right| derived.contains_key(if right { &c.right } else { &c.left }))
+                .filter_map(|right| {
+                    let alts = cmp_alternatives(c, right, derived)?;
+                    Some(substitute_cached(&Pred::Or(alts), derived, depth, cache))
+                })
+                .min_by_key(pred_size);
+            match out {
+                Some(out) if pred_size(&out) <= CMP_BUDGET => out,
+                _ => node.clone(),
+            }
+        }
         Pred::Atom(a) if !a.is_array && derived.contains_key(&a.var) => {
             let key = format!("{}|{:?}|{:?}|{}", a.var, a.op, a.values, depth);
             if let Some(p) = cache.get(&key) {
@@ -4363,6 +4428,20 @@ mod tests {
             .filter_map(|r| Some(n(&r[0])? - n(&r[1])?))
             .collect();
         assert!(diffs.iter().any(|&d| d >= 1) && diffs.iter().any(|&d| d <= 0));
+    }
+
+    #[test]
+    fn differences_of_derived_variables_are_compared() {
+        // Columns are a, b. `x - y ge 2` holds only at a = 1, b = 0.
+        let (rows, cov) = minimal_rows(
+            "if a in (0,1) and b in (0,1) then do;\n\
+             if a = 1 then x = 3; else x = 1;\n\
+             if b = 1 then y = 2; else y = 1;\n\
+             if x - y ge 2 then far = 1; else far = 0;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(rows.iter().any(|r| r == &["1", "0"]), "{rows:?}");
     }
 
     #[test]
