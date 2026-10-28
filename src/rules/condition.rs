@@ -19,6 +19,9 @@ pub enum Lit {
     /// comparison with blanks, so `'A '` and `"A"` are equal). Case is
     /// significant.
     Str(String),
+    /// A missing value: `.` (`None`), or a special missing `.a`-`.z` /
+    /// `._`, lowercased. Each is distinct: `.a = .` is false.
+    Missing(Option<char>),
 }
 
 impl Lit {
@@ -26,7 +29,7 @@ impl Lit {
         match self {
             Lit::Int(n) => Some(*n as f64),
             Lit::Float(bits) => Some(f64::from_bits(*bits)),
-            Lit::Str(_) => None,
+            Lit::Str(_) | Lit::Missing(_) => None,
         }
     }
 }
@@ -49,7 +52,7 @@ pub fn literal_at(toks: &[Token], k: usize) -> Option<(Lit, usize)> {
             let neg = match lit {
                 Lit::Int(n) => Lit::Int(-n),
                 Lit::Float(bits) => num_lit(-f64::from_bits(bits)),
-                Lit::Str(_) => return None,
+                Lit::Str(_) | Lit::Missing(_) => return None,
             };
             Some((neg, used + 1))
         }
@@ -58,6 +61,19 @@ pub fn literal_at(toks: &[Token], k: usize) -> Option<(Lit, usize)> {
             f.is_finite().then(|| (num_lit(f), 1))
         }
         TokenType::StringLiteral => Some((Lit::Str(string_value(&t.text)), 1)),
+        // `.a` lexes as DOT + a one-letter name with no space between.
+        TokenType::DOT => match toks.get(k + 1) {
+            Some(n)
+                if n.token_type == TokenType::Identifier
+                    && n.start_byte == t.end_byte
+                    && n.text.len() == 1
+                    && n.text.chars().all(|c| c.is_ascii_alphabetic() || c == '_') =>
+            {
+                let c = n.text.chars().next().map(|c| c.to_ascii_lowercase());
+                Some((Lit::Missing(c), 2))
+            }
+            _ => Some((Lit::Missing(None), 1)),
+        },
         _ => None,
     }
 }
@@ -139,6 +155,35 @@ pub fn split_conjuncts(cond: &[Token]) -> Option<Vec<&[Token]>> {
     }
     parts.push(strip_outer_parens(&cond[start..]));
     Some(parts)
+}
+
+/// The operands of a condition's `and` / `or` tree, each with its outer
+/// parens peeled: `(a = 1 | b = 2) & c = 3` yields `a = 1`, `b = 2`,
+/// `c = 3`. An operand that is anything other than an `and` / `or`
+/// (a comparison, arithmetic, a `not …`) is a leaf and is not split.
+pub fn logical_operands(cond: &[Token]) -> Vec<&[Token]> {
+    let cond = strip_outer_parens(cond);
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (j, t) in cond.iter().enumerate() {
+        match t.token_type {
+            TokenType::LPAREN => depth += 1,
+            TokenType::RPAREN => depth = depth.saturating_sub(1),
+            ty if depth == 0
+                && (CONJUNCTION_OPS.contains(&ty) || DISJUNCTION_OPS.contains(&ty)) =>
+            {
+                parts.push(&cond[start..j]);
+                start = j + 1;
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        return vec![cond];
+    }
+    parts.push(&cond[start..]);
+    parts.into_iter().flat_map(logical_operands).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

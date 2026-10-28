@@ -378,6 +378,16 @@ fn doubled_quotes_are_one_quote() {
 }
 
 #[test]
+fn missing_values_are_values() {
+    // Each special missing is its own value: `.a = .` is false.
+    let src = "if e in (., .A, 1) then do;\n\
+               if e in (., .a) then x = 1;\n\
+               if e = .b then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(3, 8)]);
+}
+
+#[test]
 fn negative_and_exponent_literals_are_values() {
     let src = "if e in (-1, 1e2) then do;\n\
                if e in (-1, 100) then x = 1;\n\

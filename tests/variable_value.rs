@@ -59,6 +59,45 @@ fn fires_on_out_of_range_literals() {
     assert!(messages.iter().any(|m| m.contains("9") && m.contains("V4")));
 }
 
+fn reported(src: &str) -> Vec<String> {
+    linter()
+        .lint(src, "example.sas")
+        .into_iter()
+        .filter(|f| f.rule == "variable_value_out_of_known_range")
+        .map(|f| format!("{}:{}", f.line, f.column))
+        .collect()
+}
+
+#[test]
+fn only_a_whole_comparison_is_checked() {
+    // `V1 = 9` is part of a larger expression in each of these, not a test
+    // of V1 against 9.
+    for cond in [
+        "SCORE + V1 = 9",
+        "V1 = 9 + 1",
+        "V1 = 9 * SCORE",
+        "V1 in (9) + 1",
+        "not V1 = 9",
+    ] {
+        let src = format!("if {cond} then cOut = 1;\n");
+        assert_eq!(reported(&src), Vec::<String>::new(), "{cond}");
+    }
+}
+
+#[test]
+fn each_and_or_operand_is_checked() {
+    let src = "if V1 = 9 and SCORE in (1, 7) then cOut = 1;\n\
+               if (RANK = 1 | V1 = 9) & (V4 = 4) then cOut = 2;\n\
+               if V1 = -1 then cOut = 3;\n";
+    assert_eq!(reported(src), vec!["1:9", "1:28", "2:21", "2:32", "3:9"]);
+}
+
+#[test]
+fn missing_values_in_a_list_are_not_checked_but_do_not_hide_the_rest() {
+    let src = "if V1 in (., .a, ._, 9) then cOut = 1;\n";
+    assert_eq!(reported(src), vec!["1:22"]);
+}
+
 #[test]
 fn silent_on_clean_fixture() {
     let path = fixtures_root().join("clean.sas");

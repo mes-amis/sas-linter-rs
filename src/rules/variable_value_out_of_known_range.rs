@@ -5,9 +5,9 @@ use sas_lexer::TokenType;
 use crate::config::opt_bool;
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
-use crate::token::Token;
 use crate::value_specs::{Spec, SpecKind, SpecSource, ValueSpecs};
 
+use super::condition::{self, CmpOp, Comparison};
 use super::RuleMeta;
 
 pub struct VariableValueOutOfKnownRange {
@@ -60,35 +60,26 @@ impl Rule for VariableValueOutOfKnownRange {
         }
         let tokens = &ctx.tokens.default;
         let mut findings = Vec::new();
-        let mut in_condition = false;
         let mut i = 0;
         while i < tokens.len() {
-            let t = &tokens[i];
-            match t.token_type {
-                TokenType::KwIf => {
-                    in_condition = true;
-                    i += 1;
-                    continue;
-                }
-                TokenType::KwThen | TokenType::SEMI => {
-                    in_condition = false;
-                    i += 1;
-                    continue;
-                }
-                _ => {}
+            if tokens[i].token_type != TokenType::KwIf {
+                i += 1;
+                continue;
             }
-            if in_condition && t.token_type == TokenType::Identifier {
-                if let Some(op) = tokens.get(i + 1) {
-                    let (consumed, mut sub) =
-                        self.check_comparison(tokens, i, t, op, ctx.path, specs);
-                    findings.append(&mut sub);
-                    if consumed > 0 {
-                        i += consumed;
-                        continue;
-                    }
+            // The condition runs to `then`, or to `;` for a subsetting `if`.
+            let end = tokens[i + 1..]
+                .iter()
+                .position(|t| matches!(t.token_type, TokenType::KwThen | TokenType::SEMI))
+                .map_or(tokens.len(), |p| i + 1 + p);
+            // Only a comparison that is a whole operand of the condition's
+            // `and` / `or` tree tests the variable against the literal:
+            // the `x = 5` in `y + x = 5` or `x = 5 + 1` does not.
+            for part in condition::logical_operands(&tokens[i + 1..end]) {
+                if let Some(cmp) = condition::comparison(part) {
+                    findings.extend(self.check_comparison(&cmp, ctx.path, specs));
                 }
             }
-            i += 1;
+            i = end;
         }
         findings
     }
@@ -99,108 +90,37 @@ impl VariableValueOutOfKnownRange {
         self.specs.get_or_init(|| self.source.load())
     }
 
-    fn check_comparison(
-        &self,
-        tokens: &[Token],
-        ident_idx: usize,
-        ident: &Token,
-        op: &Token,
-        path: &str,
-        specs: &ValueSpecs,
-    ) -> (usize, Vec<Finding>) {
-        let Some(spec) = specs.lookup(&ident.text) else {
-            return (0, vec![]);
-        };
-
-        match op.token_type {
-            TokenType::KwIN => {
-                let Some(lparen) = tokens.get(ident_idx + 2) else {
-                    return (0, vec![]);
-                };
-                if lparen.token_type != TokenType::LPAREN {
-                    return (0, vec![]);
-                }
-                let mut findings = Vec::new();
-                let mut k = ident_idx + 3;
-                while k < tokens.len() {
-                    let t = &tokens[k];
-                    if t.token_type == TokenType::RPAREN {
-                        return (k - ident_idx + 1, findings);
-                    }
-                    if t.token_type == TokenType::COMMA {
-                        k += 1;
-                        continue;
-                    }
-                    if let Some(lit) = literal_value(t) {
-                        if !value_allowed(spec, &lit) {
-                            findings.push(Finding {
-                                path: path.to_string(),
-                                line: t.start_line,
-                                column: t.start_column + 1,
-                                rule: ID,
-                                message: format_message(&ident.text, &lit.display, spec),
-                                severity: Severity::Warning,
-                            });
-                        }
-                    }
-                    k += 1;
-                }
-                (k - ident_idx + 1, findings)
-            }
-            TokenType::KwEQ | TokenType::ASSIGN => {
-                let Some(lit_tok) = tokens.get(ident_idx + 2) else {
-                    return (0, vec![]);
-                };
-                let Some(lit) = literal_value(lit_tok) else {
-                    return (0, vec![]);
-                };
-                if value_allowed(spec, &lit) {
-                    return (3, vec![]);
-                }
-                (
-                    3,
-                    vec![Finding {
-                        path: path.to_string(),
-                        line: lit_tok.start_line,
-                        column: lit_tok.start_column + 1,
-                        rule: ID,
-                        message: format_message(&ident.text, &lit.display, spec),
-                        severity: Severity::Warning,
-                    }],
-                )
-            }
-            _ => (0, vec![]),
+    /// Findings for the literals of an equality / `in` test that fall
+    /// outside the variable's documented values.
+    fn check_comparison(&self, cmp: &Comparison, path: &str, specs: &ValueSpecs) -> Vec<Finding> {
+        if cmp.op != CmpOp::In {
+            return vec![];
         }
+        let Some(spec) = specs.lookup(&cmp.var.text) else {
+            return vec![];
+        };
+        cmp.values
+            .iter()
+            .filter(|v| v.lit.as_f64().is_some_and(|n| !value_allowed(spec, n)))
+            .map(|v| Finding {
+                path: path.to_string(),
+                line: v.tok.start_line,
+                column: v.tok.start_column + 1,
+                rule: ID,
+                message: format_message(&cmp.var.text, &v.display, spec),
+                severity: Severity::Warning,
+            })
+            .collect()
     }
 }
 
-#[derive(Debug)]
-struct Literal {
-    value: f64,
-    display: String,
-}
-
-fn literal_value(t: &Token) -> Option<Literal> {
-    match t.token_type {
-        TokenType::IntegerLiteral | TokenType::FloatLiteral => t
-            .text
-            .parse::<f64>()
-            .ok()
-            .filter(|f| f.is_finite())
-            .map(|value| Literal {
-                value,
-                display: t.text.clone(),
-            }),
-        _ => None,
-    }
-}
-
-fn value_allowed(spec: &Spec, lit: &Literal) -> bool {
-    let int = lit.value as i64;
+/// Is numeric value `n` among the spec's acceptable values?
+fn value_allowed(spec: &Spec, n: f64) -> bool {
+    let int = n as i64;
     match &spec.kind {
-        SpecKind::Decimal(lo, hi) => lit.value >= *lo && lit.value <= *hi,
+        SpecKind::Decimal(lo, hi) => n >= *lo && n <= *hi,
         // Integer catalogs say nothing about fractional literals.
-        _ if lit.value.fract() != 0.0 => true,
+        _ if n.fract() != 0.0 => true,
         SpecKind::Range(lo, hi) => int >= *lo && int <= *hi,
         SpecKind::Set(values) => values.contains(&int),
     }
