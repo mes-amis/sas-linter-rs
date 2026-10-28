@@ -74,12 +74,6 @@ fn run_group_procs_stay_unchecked_until_quit() {
 }
 
 #[test]
-fn a_multi_word_assignment_target_is_left_to_invalid_assignment_target() {
-    let src = "data foo;\n Predicted risk = 1;\nrun;\n";
-    assert!(findings(src).is_empty(), "{:?}", findings(src));
-}
-
-#[test]
 fn a_multi_word_assignment_target_in_open_code_is_flagged() {
     // `invalid_assignment_target` only reports inside data steps.
     let src = "Predicted risk = 1;\ndata foo;\nrun;\n";

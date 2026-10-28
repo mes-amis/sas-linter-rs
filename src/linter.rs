@@ -54,6 +54,7 @@ impl Linter {
         for rule in &self.rules {
             findings.extend(rule.check(&ctx));
         }
+        let findings = apply_report_precedence(findings);
 
         let mut modified = source.to_string();
         for rule in self.fixers(|_| true) {
@@ -129,4 +130,22 @@ impl Linter {
         std::fs::write(path, modified.as_bytes())?;
         Ok(true)
     }
+}
+
+/// Drop findings that a more specific rule's finding on the same line
+/// explains (`rules::REPORT_PRECEDENCE`).
+fn apply_report_precedence(findings: Vec<Finding>) -> Vec<Finding> {
+    let explained: std::collections::HashSet<(&'static str, u32)> = findings
+        .iter()
+        .flat_map(|f| {
+            rules::REPORT_PRECEDENCE
+                .iter()
+                .filter(move |(winner, _)| *winner == f.rule)
+                .flat_map(move |(_, losers)| losers.iter().map(move |l| (*l, f.line)))
+        })
+        .collect();
+    findings
+        .into_iter()
+        .filter(|f| !explained.contains(&(f.rule, f.line)))
+        .collect()
 }

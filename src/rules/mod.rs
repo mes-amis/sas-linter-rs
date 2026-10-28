@@ -96,6 +96,25 @@ pub const AUTOFIX_ORDER: &[&str] = &[
     "inconsistent_variable_case",
 ];
 
+/// When a rule reports a line, findings on that line from the rules listed
+/// after it are dropped: the first rule names the actual defect, and the
+/// others are tripping over its consequences. Only applies while the first
+/// rule is enabled, so the line is never left unreported.
+pub const REPORT_PRECEDENCE: &[(&str, &[&str])] = &[
+    // Header text running as code reads as an invalid statement, a broken
+    // `if` and stray identifiers.
+    (
+        "source_headers",
+        &[
+            "statement_not_valid",
+            "malformed_if_condition",
+            "inconsistent_variable_case",
+        ],
+    ),
+    // `Predicted risk = …` is an invalid statement too; this one names the fix.
+    ("invalid_assignment_target", &["statement_not_valid"]),
+];
+
 /// Rule ids folded into another rule, mapped to the id that now covers
 /// them. Configs and `--rules` lists naming a retired id keep working.
 const RETIRED_IDS: &[(&str, &str)] = &[("star_comment_swallows_code", "unterminated_comment")];
