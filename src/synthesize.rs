@@ -317,6 +317,8 @@ struct CmpAtom {
     left: String,
     op: Op,
     right: String,
+    /// `Some(k)` for `left - right op k`, which is missing when either is.
+    diff: Option<f64>,
 }
 
 /// A counter `X = base; … if c then X = X + k; …` compared with literals:
@@ -1171,16 +1173,9 @@ fn derived_definitions(
 
 /// The values each variable of a [`DefValue::Linear`] can take: those its
 /// condition lists (`a in (0,1)`), its catalog spec's, or a derived
-/// variable's constants. A variable with a sum over anything else is
-/// dropped from `derived`, so conditions on it stay unknowns.
+/// variable's ([`derived_values`]). A variable with a sum over anything
+/// else is dropped from `derived`, so conditions on it stay unknowns.
 fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
-    let spec_values = |var: &str| match specs.lookup(var).map(|s| &s.kind) {
-        Some(SpecKind::Set(v)) => Some(v.iter().map(|&x| x as f64).collect()),
-        Some(SpecKind::Range(lo, hi)) if hi - lo < COUNTER_VALUES as i64 => {
-            Some((*lo..=*hi).map(|x| x as f64).collect())
-        }
-        _ => None,
-    };
     let mut filled: HashMap<(String, usize), Vec<Vec<f64>>> = HashMap::new();
     let mut unmodelled = Vec::new();
     for (var, defs) in derived.iter() {
@@ -1192,11 +1187,30 @@ fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
                 .iter()
                 .map(|t| match t.test {
                     Some(_) => Some(Vec::new()),
-                    None => listed_values(&t.var, &d.cond)
-                        .or_else(|| spec_values(&t.var))
-                        .or_else(|| counter_values(&t.var, derived)),
+                    None if !t.max_of.is_empty() => {
+                        let mut union: BTreeSet<i64> = BTreeSet::new();
+                        for arg in &t.max_of {
+                            let vs = term_values(arg, &d.cond, derived, specs, DERIVED_DEPTH)?;
+                            union.extend(vs.into_iter().map(milli));
+                        }
+                        Some(union.into_iter().map(|t| t as f64 / 1000.0).collect())
+                    }
+                    None => term_values(&t.var, &d.cond, derived, specs, DERIVED_DEPTH),
                 })
                 .collect();
+            // A `max(…)` term is only modelled by enumerating combinations.
+            let skips = matches!(d.value, DefValue::Sum(_));
+            let enumerable = |values: &[Vec<f64>]| {
+                terms
+                    .iter()
+                    .zip(values)
+                    .try_fold(1usize, |n, (t, v)| {
+                        n.checked_mul(term_choices(t, v.len(), &d.cond, skips))
+                    })
+                    .is_some_and(|n| n <= LINEAR_COMBINATIONS)
+            };
+            let values =
+                values.filter(|v| terms.iter().all(|t| t.max_of.is_empty()) || enumerable(v));
             match values {
                 Some(v) => {
                     filled.insert((var.clone(), i), v);
@@ -1218,6 +1232,113 @@ fn linear_values(derived: &mut HashMap<String, Vec<Def>>, specs: &ValueSpecs) {
         derived.remove(&var);
     }
 }
+
+/// The values `var` can take where `cond` holds: those `cond` lists, its
+/// catalog spec's, or a derived variable's ([`derived_values`]).
+fn term_values(
+    var: &str,
+    cond: &[Pred],
+    derived: &HashMap<String, Vec<Def>>,
+    specs: &ValueSpecs,
+    depth: usize,
+) -> Option<Vec<f64>> {
+    listed_values(var, cond)
+        .or_else(|| match specs.lookup(var).map(|s| &s.kind) {
+            Some(SpecKind::Set(v)) => Some(v.iter().map(|&x| x as f64).collect()),
+            Some(SpecKind::Range(lo, hi)) if hi - lo < COUNTER_VALUES as i64 => {
+                Some((*lo..=*hi).map(|x| x as f64).collect())
+            }
+            _ => None,
+        })
+        .or_else(|| derived_values(var, derived, specs, depth))
+}
+
+/// Every number derived variable `var` can be given: its constants, the
+/// values of what it copies, the sums a [`DefValue::Linear`] of variables
+/// with known values can make (`x = iD1 - 1`, `x = a + b`), or a counter's
+/// totals. `None` when one isn't known or there are more than
+/// [`COUNTER_VALUES`].
+fn derived_values(
+    var: &str,
+    derived: &HashMap<String, Vec<Def>>,
+    specs: &ValueSpecs,
+    depth: usize,
+) -> Option<Vec<f64>> {
+    let defs = derived.get(var)?;
+    if depth == 0 {
+        return None;
+    }
+    if defs
+        .iter()
+        .any(|d| matches!(d.value, DefValue::Add(_) | DefValue::AddVar(..)))
+    {
+        return counter_values(var, derived);
+    }
+    let mut out: BTreeSet<i64> = BTreeSet::new();
+    for d in defs {
+        let values = match &d.value {
+            DefValue::Const(Value::Missing) => Vec::new(),
+            DefValue::Const(v) => vec![v.as_f64()?],
+            DefValue::Copy(src) => term_values(src, &d.cond, derived, specs, depth - 1)?,
+            DefValue::Linear(base, terms) => {
+                let mut sums: BTreeSet<i64> = BTreeSet::from([milli(*base)]);
+                for t in terms {
+                    let steps = match t.test {
+                        Some(_) => vec![0.0, 1.0],
+                        None => term_values(&t.var, &d.cond, derived, specs, depth - 1)?,
+                    };
+                    sums = sums
+                        .iter()
+                        .flat_map(|s| steps.iter().map(move |v| s + milli(v * t.coeff)))
+                        .collect();
+                    if sums.len() > COUNTER_VALUES {
+                        return None;
+                    }
+                }
+                sums.into_iter().map(|t| t as f64 / 1000.0).collect()
+            }
+            _ => return None,
+        };
+        out.extend(values.into_iter().map(milli));
+        if out.len() > COUNTER_VALUES {
+            return None;
+        }
+    }
+    Some(out.into_iter().map(|t| t as f64 / 1000.0).collect())
+}
+
+/// How many choices term `t`, with `n` values, offers a combination: a
+/// test holds or not; a variable takes one of its values, or (in
+/// `sum()`, where `cond` doesn't list its values) is missing; a `max(…)`
+/// likewise, missing only when every argument may be.
+fn term_choices(t: &LinearTerm, n: usize, cond: &[Pred], skips: bool) -> usize {
+    match &t.test {
+        Some(_) => 2,
+        None if !t.max_of.is_empty() => {
+            n + usize::from(skips && t.max_of.iter().all(|a| may_be_missing(a, cond)))
+        }
+        None => n + usize::from(skips && may_be_missing(&t.var, cond)),
+    }
+}
+
+/// Whether `var` can be missing where `cond` holds: no condition lists
+/// its values, or the list includes `.`.
+fn may_be_missing(var: &str, cond: &[Pred]) -> bool {
+    fn listed(var: &str, conds: &[Pred]) -> Option<bool> {
+        conds.iter().find_map(|c| match c {
+            Pred::Atom(a) if a.var == var && !a.is_array && matches!(a.op, Op::In | Op::Eq) => {
+                Some(a.values.contains(&Value::Missing))
+            }
+            Pred::And(c) => listed(var, c),
+            _ => None,
+        })
+    }
+    listed(var, cond).unwrap_or(true)
+}
+
+/// Most combinations of term values a [`DefValue::Linear`] is rewritten
+/// as one alternative each; beyond it the sum becomes a count.
+const LINEAR_COMBINATIONS: usize = 128;
 
 /// Largest rewritten condition (in predicate nodes) [`substitute_derived`]
 /// will produce for one atom; beyond it the atom stays an unknown. Sources
@@ -1336,7 +1457,118 @@ fn substitute_cached(
                             }
                             out
                         };
-                        let vars = || terms.iter().filter(|t| t.test.is_none());
+                        let vars = || {
+                            terms
+                                .iter()
+                                .filter(|t| t.test.is_none() && t.max_of.is_empty())
+                        };
+                        // Few enough combinations: one alternative per
+                        // combination of term values the atom accepts,
+                        // each pinning every term, so picks of one term
+                        // can't disagree with the total. A choice adds a
+                        // number, or None for a missing `sum()` argument;
+                        // `sum()` is missing when every argument is.
+                        let may_be_missing = |var: &str| skips && may_be_missing(var, &d.cond);
+                        let choices: Vec<Vec<(Pred, Option<f64>)>> = terms
+                            .iter()
+                            .map(|t| {
+                                let mut out = Vec::new();
+                                if let Some(test) = &t.test {
+                                    out.push((test.clone(), Some(t.coeff)));
+                                    out.push((negate(test), Some(0.0)));
+                                } else if !t.max_of.is_empty() {
+                                    // `max(…) = v`: some argument is v and
+                                    // none is more.
+                                    for &v in &t.values {
+                                        let at = |op| {
+                                            t.max_of
+                                                .iter()
+                                                .map(|x| is(x, op, vec![Value::number(v)]))
+                                                .collect()
+                                        };
+                                        out.push((
+                                            Pred::And(vec![
+                                                Pred::Or(at(Op::Eq)),
+                                                Pred::And(at(Op::Le)),
+                                            ]),
+                                            Some(v * t.coeff),
+                                        ));
+                                    }
+                                    if t.max_of.iter().all(|x| may_be_missing(x)) {
+                                        let none = t
+                                            .max_of
+                                            .iter()
+                                            .map(|x| is(x, Op::Eq, vec![Value::Missing]))
+                                            .collect();
+                                        out.push((Pred::And(none), None));
+                                    }
+                                } else {
+                                    for &v in &t.values {
+                                        out.push((
+                                            is(&t.var, Op::Eq, vec![Value::number(v)]),
+                                            Some(v * t.coeff),
+                                        ));
+                                    }
+                                    if may_be_missing(&t.var) {
+                                        out.push((is(&t.var, Op::Eq, vec![Value::Missing]), None));
+                                    }
+                                }
+                                out
+                            })
+                            .collect();
+                        let combos = choices
+                            .iter()
+                            .try_fold(1usize, |n, c| n.checked_mul(c.len()))
+                            .filter(|&n| n > 0 && n <= LINEAR_COMBINATIONS);
+                        let enumerated = combos.is_some().then(|| {
+                            // A tree choosing each term's value in turn,
+                            // keeping the branches some accepted total
+                            // completes, so shared prefixes are written
+                            // once.
+                            fn branch(
+                                choices: &[Vec<(Pred, Option<f64>)>],
+                                total: Option<f64>,
+                                accepts: &dyn Fn(Option<f64>) -> bool,
+                            ) -> Option<Vec<Pred>> {
+                                let Some((first, rest)) = choices.split_first() else {
+                                    return accepts(total).then(Vec::new);
+                                };
+                                let alts: Vec<Pred> = first
+                                    .iter()
+                                    .filter_map(|(p, k)| {
+                                        let total = match (total, k) {
+                                            (Some(t), Some(k)) => Some(t + k),
+                                            (None, k) => *k,
+                                            (t, None) => t,
+                                        };
+                                        let mut all = vec![p.clone()];
+                                        all.extend(branch(rest, total, accepts)?);
+                                        Some(Pred::And(all))
+                                    })
+                                    .collect();
+                                match alts.len() {
+                                    0 => None,
+                                    1 => match alts.into_iter().next() {
+                                        Some(Pred::And(all)) => Some(all),
+                                        _ => unreachable!(),
+                                    },
+                                    _ => Some(vec![Pred::Or(alts)]),
+                                }
+                            }
+                            let accepts = |total: Option<f64>| {
+                                let total =
+                                    total.map_or(Value::Missing, |t| Value::number(base + t));
+                                holds(a.op, &total, &a.values) == Some(true)
+                            };
+                            let choices: Vec<Vec<(Pred, Option<f64>)>> = choices
+                                .iter()
+                                .map(|c| c.iter().map(|(p, k)| (recur(p, cache), *k)).collect())
+                                .collect();
+                            match branch(&choices, None, &accepts) {
+                                Some(all) => vec![Pred::And(all)],
+                                None => Vec::new(),
+                            }
+                        });
                         let mut all: Vec<Pred> = vars()
                             .map(|t| recur(&is(&t.var, Op::In, numbers(&t.values)), cache))
                             .collect();
@@ -1368,8 +1600,23 @@ fn substitute_cached(
                             op: a.op,
                             values: a.values.clone(),
                         }));
-                        let mut any_of = vec![Pred::And(all)];
-                        if holds(a.op, &Value::Missing, &a.values) == Some(true) {
+                        // An enumerated `sum()` already has its all-missing
+                        // combinations.
+                        // Large enumerations of plain sums stay counts,
+                        // which grow with the terms rather than with
+                        // their combinations.
+                        let has_max = terms.iter().any(|t| !t.max_of.is_empty());
+                        let enumerated = enumerated.filter(|alts| {
+                            has_max
+                                || alts.iter().map(pred_size).sum::<usize>() <= DERIVED_BUDGET / 2
+                        });
+                        let enumerated_sum = skips && enumerated.is_some();
+                        let mut any_of = match enumerated {
+                            Some(alternatives) => alternatives,
+                            None => vec![Pred::And(all)],
+                        };
+                        if !enumerated_sum && holds(a.op, &Value::Missing, &a.values) == Some(true)
+                        {
                             let missing = vars()
                                 .map(|t| recur(&is(&t.var, Op::Eq, vec![Value::Missing]), cache));
                             if skips {
@@ -1981,6 +2228,9 @@ struct LinearTerm {
     /// A comparison in parentheses (`(a = 0)`), 1 when it holds and 0
     /// otherwise, in place of a variable.
     test: Option<Pred>,
+    /// The arguments of a `max(…)` in place of a variable: their largest
+    /// value, missing when all are.
+    max_of: Vec<String>,
 }
 
 enum Operand {
@@ -2096,27 +2346,70 @@ fn linear_sum(var: &str, rhs: &[Token]) -> Option<(f64, Vec<(Operand, f64)>)> {
         .then_some((base, terms))
 }
 
-/// `sum(a, b, …)` over plain variables, as the variables.
-fn sum_call(rhs: &[Token]) -> Option<Vec<String>> {
-    let [name, open, args @ .., close] = rhs else {
+/// An argument of [`sum_call`].
+enum SumArg {
+    Var(String),
+    /// `max(a, b)` or `max(of a b)`.
+    Max(Vec<String>),
+}
+
+/// `sum(a, b, …)` over plain variables and `max(…)`s of them, as its
+/// arguments.
+fn sum_call(rhs: &[Token]) -> Option<Vec<SumArg>> {
+    let args = call_args(rhs, "sum")?;
+    args.iter()
+        .map(|arg| match arg {
+            [t] if t.token_type == TokenType::Identifier => Some(SumArg::Var(t.text.clone())),
+            _ => {
+                let inner = call_args(arg, "max")?;
+                let mut vars = Vec::new();
+                for (k, piece) in inner.iter().enumerate() {
+                    for (j, t) in piece.iter().enumerate() {
+                        // `of` lexes as an identifier and only means
+                        // "variable list" as the call's first word.
+                        let of = k == 0 && j == 0 && t.text.eq_ignore_ascii_case("of");
+                        if t.token_type != TokenType::Identifier {
+                            return None;
+                        }
+                        if !of {
+                            vars.push(t.text.clone());
+                        }
+                    }
+                }
+                (!vars.is_empty()).then_some(SumArg::Max(vars))
+            }
+        })
+        .collect()
+}
+
+/// The comma-separated arguments of `name( … )` when `tokens` is exactly
+/// that call.
+fn call_args<'t>(tokens: &'t [Token], name: &str) -> Option<Vec<&'t [Token]>> {
+    let [call, open, inner @ .., close] = tokens else {
         return None;
     };
-    if name.token_type != TokenType::Identifier
-        || !name.text.eq_ignore_ascii_case("sum")
+    if call.token_type != TokenType::Identifier
+        || !call.text.eq_ignore_ascii_case(name)
         || open.token_type != TokenType::LPAREN
         || close.token_type != TokenType::RPAREN
     {
         return None;
     }
-    let mut vars = Vec::new();
-    for (k, t) in args.iter().enumerate() {
-        match (k % 2, t.token_type) {
-            (0, TokenType::Identifier) => vars.push(t.text.clone()),
-            (1, TokenType::COMMA) => {}
-            _ => return None,
+    let mut args = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (k, t) in inner.iter().enumerate() {
+        match t.token_type {
+            TokenType::LPAREN => depth += 1,
+            TokenType::RPAREN => depth -= 1,
+            TokenType::COMMA if depth == 0 => {
+                args.push(&inner[start..k]);
+                start = k + 1;
+            }
+            _ => {}
         }
     }
-    (!vars.is_empty() && args.len() % 2 == 1).then_some(vars)
+    args.push(&inner[start..]);
+    args.iter().all(|a| !a.is_empty()).then_some(args)
 }
 
 /// The index of the `)` closing the `(` at `open` when the tokens between
@@ -2242,14 +2535,27 @@ impl Walker<'_> {
                             .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
                     })
                     .or_else(|| {
-                        sum_call(rhs).map(|vars| {
+                        sum_call(rhs).map(|args| {
                             DefValue::Sum(
-                                vars.into_iter()
-                                    .map(|v| LinearTerm {
-                                        var: resolve_alias(self.aliases, v),
-                                        coeff: 1.0,
-                                        values: Vec::new(),
-                                        test: None,
+                                args.into_iter()
+                                    .map(|arg| match arg {
+                                        SumArg::Var(v) => LinearTerm {
+                                            var: resolve_alias(self.aliases, v),
+                                            coeff: 1.0,
+                                            values: Vec::new(),
+                                            test: None,
+                                            max_of: Vec::new(),
+                                        },
+                                        SumArg::Max(vars) => LinearTerm {
+                                            var: String::new(),
+                                            coeff: 1.0,
+                                            values: Vec::new(),
+                                            test: None,
+                                            max_of: vars
+                                                .into_iter()
+                                                .map(|v| resolve_alias(self.aliases, v))
+                                                .collect(),
+                                        },
                                     })
                                     .collect(),
                             )
@@ -2265,11 +2571,13 @@ impl Walker<'_> {
                                         coeff,
                                         values: Vec::new(),
                                         test: None,
+                                        max_of: Vec::new(),
                                     },
                                     Operand::Test(range) => LinearTerm {
                                         var: String::new(),
                                         coeff,
                                         values: Vec::new(),
+                                        max_of: Vec::new(),
                                         test: Some(
                                             PredicateParser::new(
                                                 &rhs[range],
@@ -2707,8 +3015,33 @@ impl<'a> PredicateParser<'a> {
         p.map(|p| if negated { Pred::Not(Box::new(p)) } else { p })
     }
 
-    /// The `in (…)` list or comparison after `var`, at the cursor.
+    /// The `in (…)` list or comparison after `var`, at the cursor, or
+    /// `- y op k` comparing the difference of `var` and `y` with `k`.
     fn parse_comparison(&mut self, var: String) -> Option<Pred> {
+        if self.peek(TokenType::MINUS)
+            && self.peek_at(self.i + 1, TokenType::Identifier)
+            && !self.arrays.contains_key(&var)
+            && !self.arrays.contains_key(&self.t[self.i + 1].text)
+        {
+            let save = self.i;
+            let right = self.t[self.i + 1].text.clone();
+            if let Some(op) = ty(self.t, self.i + 2).and_then(cmp_op) {
+                self.i += 3;
+                if let Some(k) = self.consume_literal().and_then(|v| v.as_f64()) {
+                    let (left, right) = (self.resolve(var), self.resolve(right));
+                    self.used.insert(left.clone());
+                    self.used.insert(right.clone());
+                    return Some(Pred::Cmp(CmpAtom {
+                        left,
+                        op,
+                        right,
+                        diff: Some(k),
+                    }));
+                }
+            }
+            self.i = save;
+            return None;
+        }
         if self.peek(TokenType::KwIN) && self.peek_at(self.i + 1, TokenType::LPAREN) {
             self.i += 2;
             let values = self.consume_literal_list_until_rparen();
@@ -2731,7 +3064,12 @@ impl<'a> PredicateParser<'a> {
                 let (left, right) = (self.resolve(var), self.resolve(right));
                 self.used.insert(left.clone());
                 self.used.insert(right.clone());
-                return Some(Pred::Cmp(CmpAtom { left, op, right }));
+                return Some(Pred::Cmp(CmpAtom {
+                    left,
+                    op,
+                    right,
+                    diff: None,
+                }));
             }
         }
         None
@@ -2835,7 +3173,16 @@ impl<'a> PredicateParser<'a> {
                         break;
                     }
                 }
-                TokenType::Identifier if depth == 1 => args.push(self.resolve(t.text.clone())),
+                // `max(of a b)`: `of` lexes as an identifier, and only
+                // means "variable list" as the call's first word.
+                TokenType::Identifier
+                    if depth == 1
+                        && !(args.is_empty()
+                            && t.text.eq_ignore_ascii_case("of")
+                            && self.peek_at(self.i - 1, TokenType::LPAREN)) =>
+                {
+                    args.push(self.resolve(t.text.clone()))
+                }
                 _ => {}
             }
             self.i += 1;
@@ -3456,6 +3803,18 @@ fn satisfy_atom(atom: &Atom, row: &mut Row, g: &Graph, rng: &mut Rng) {
 /// Pin whichever side of `left op right` is still free to a value that
 /// makes the comparison hold, trying the free side's value set and the
 /// neighbours of the pinned side.
+/// Whether `c` holds with `l` on its left and `r` on its right.
+fn cmp_holds(c: &CmpAtom, l: &Value, r: &Value) -> Option<bool> {
+    let Some(k) = c.diff else {
+        return holds(c.op, l, std::slice::from_ref(r));
+    };
+    let diff = match (l, r) {
+        (Value::Missing, _) | (_, Value::Missing) => Value::Missing,
+        _ => Value::number(l.as_f64()? - r.as_f64()?),
+    };
+    holds(c.op, &diff, &[Value::number(k)])
+}
+
 fn satisfy_cmp(c: &CmpAtom, row: &mut Row, g: &Graph, rng: &mut Rng) {
     let empty = Vec::new();
     let pick = |var: &str, row: &Row, rng: &mut Rng| -> Value {
@@ -3483,7 +3842,7 @@ fn satisfy_cmp(c: &CmpAtom, row: &mut Row, g: &Graph, rng: &mut Rng) {
         } else {
             (v, &anchor)
         };
-        holds(c.op, l, std::slice::from_ref(r)) == Some(true)
+        cmp_holds(c, l, r) == Some(true)
     };
     let vs = g.value_sets.get(free).unwrap_or(&empty);
     let mut pool: Vec<Value> = vs.clone();
@@ -3492,6 +3851,11 @@ fn satisfy_cmp(c: &CmpAtom, row: &mut Row, g: &Graph, rng: &mut Rng) {
         bump(anchor.clone(), -1),
         bump(anchor.clone(), 1),
     ]);
+    if let (Some(k), Some(a)) = (c.diff, anchor.as_f64()) {
+        for d in [-1.0, 0.0, 1.0] {
+            pool.extend([Value::number(a + k + d), Value::number(a - k + d)]);
+        }
+    }
     let fits: Vec<&Value> = pool.iter().filter(|v| holds_with(v)).collect();
     let v = rng
         .choose(&fits)
@@ -3760,11 +4124,7 @@ fn eval(node: &Pred, row: &Row, g: &Graph, slot: Option<usize>) -> Option<bool> 
             }
             holds(s.op, &Value::Float(total), std::slice::from_ref(&s.value))
         }
-        Pred::Cmp(c) => holds(
-            c.op,
-            row.get(&c.left)?,
-            std::slice::from_ref(row.get(&c.right)?),
-        ),
+        Pred::Cmp(c) => cmp_holds(c, row.get(&c.left)?, row.get(&c.right)?),
         Pred::Count(c) => {
             let mut total = c.base;
             for (p, k) in &c.terms {
@@ -3948,6 +4308,24 @@ mod tests {
         );
         assert_eq!(g.inputs, vec!["a", "b"]);
         assert_eq!(g.branches.len(), 2);
+    }
+
+    #[test]
+    fn differences_of_two_variables_are_compared() {
+        // Columns are a, b.
+        let (rows, cov) = minimal_rows(
+            "if a in (0:6) and b in (0:6) then do;\n\
+             if a - b ge 1 then up = 1;\n\
+             else if a - b le 0 then up = 0;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        let n = |s: &str| s.parse::<i64>().ok();
+        let diffs: Vec<i64> = rows
+            .iter()
+            .filter_map(|r| Some(n(&r[0])? - n(&r[1])?))
+            .collect();
+        assert!(diffs.iter().any(|&d| d >= 1) && diffs.iter().any(|&d| d <= 0));
     }
 
     #[test]
@@ -4300,6 +4678,22 @@ mod tests {
             rows.iter().any(|r| r == &[".", "."] || r == &["", ""]),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn sums_of_maxima_reach_every_total() {
+        // Columns are a, b, c. `max(of a b) + c` is 4 only at a or b = 2
+        // and c = 2.
+        let (rows, cov) = minimal_rows(
+            "if a in (0,1,2) and b in (0,1,2) and c in (0,1,2) then do;\n\
+               n = sum(max(of a b), c);\n\
+               if n = 4 then s = 4; else if n = 0 then s = 0; else s = 1;\n\
+             end;\n",
+        );
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(rows
+            .iter()
+            .any(|r| (r[0] == "2" || r[1] == "2") && r[2] == "2"));
     }
 
     #[test]
