@@ -11,8 +11,9 @@ pub struct MissingAssignmentSemicolon {
 }
 
 const ID: &str = "missing_assignment_semicolon";
-const DESCRIPTION: &str = "Assignment missing terminating `;` — the inline \
-                            `**` / `*` comment marker was lexed as an operator.";
+const DESCRIPTION: &str = "Assignment (or other statement) missing its terminating \
+                            `;` — the `**` / `*` comment after it was lexed as an \
+                            operator.";
 
 pub fn meta() -> RuleMeta {
     RuleMeta {
@@ -108,6 +109,11 @@ fn is_bare_word(tokens: &[Token], i: usize) -> bool {
     word_shaped && !operator
 }
 
+/// Whether `tokens[i]` is the first token on its line.
+fn begins_line(tokens: &[Token], i: usize) -> bool {
+    i > 0 && tokens[i - 1].end_line < tokens[i].start_line
+}
+
 /// Whether the statement holding `tokens[i]` is an assignment — `VAR = …`
 /// at the start of a statement or right after `then` / `else`.
 fn in_assignment(tokens: &[Token], i: usize) -> bool {
@@ -127,7 +133,10 @@ fn in_assignment(tokens: &[Token], i: usize) -> bool {
     })
 }
 
-/// `*` / `**` markers in an assignment that start comment prose. Two bare
+/// `*` / `**` markers that start comment prose: in an assignment, or at the
+/// start of a line inside any statement whose `;` is missing (a `** … **;`
+/// banner swallowed by the `value` statement above it). Mid-line outside an
+/// assignment, words can follow `*` legitimately (`tables a * b c;`). Two bare
 /// words side by side can't occur in an expression, so the first such pair
 /// in a statement is prose, and the comment starts at the last marker
 /// before it (`x = a * b ** Note on x;`). A single word stays ambiguous
@@ -148,7 +157,7 @@ fn offenders(tokens: &[Token]) -> Vec<(&Token, &Token, &Token)> {
             && k + 1 < tokens.len()
             && is_bare_word(tokens, k)
             && is_bare_word(tokens, k + 1)
-            && in_assignment(tokens, m)
+            && (in_assignment(tokens, m) || begins_line(tokens, m))
         {
             out.push((&tokens[m], &tokens[m - 1], &tokens[m + 1]));
             // One finding per statement.

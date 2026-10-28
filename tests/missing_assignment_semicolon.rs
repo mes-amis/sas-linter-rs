@@ -103,3 +103,25 @@ fn the_comment_starts_at_the_last_marker_before_the_prose() {
     assert_eq!(f[0].column, 11, "{:?}", f);
     assert_eq!(autofix(src), "x = a * b; ** Note on x;\n");
 }
+
+#[test]
+fn a_comment_line_swallowed_by_an_unterminated_statement() {
+    // The `value` statement lacks its `;`, so the banner comment on the
+    // next line is parsed as more of it.
+    let src = "proc format;\n   value cap 0 = 'No'\n             1 = 'Yes'\n\n\
+               **  DATA STEP STARTS HERE  **;\n\ndata a;\nrun;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!((f[0].line, f[0].column), (5, 1));
+    assert_eq!(
+        autofix(src),
+        "proc format;\n   value cap 0 = 'No'\n             1 = 'Yes';\n\n\
+         **  DATA STEP STARTS HERE  **;\n\ndata a;\nrun;\n"
+    );
+}
+
+#[test]
+fn a_mid_line_star_outside_an_assignment_stays_silent() {
+    let src = "proc freq;\n tables a * b c;\nrun;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+}
