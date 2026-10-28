@@ -805,6 +805,33 @@ fn cells(g: &Graph, row: &Row) -> Vec<Value> {
         .collect()
 }
 
+/// `tokens` with each `>` or `<` followed by an `=` token (`x > = 0`)
+/// made the one `>=` or `<=` token SAS reads it as.
+fn fuse_spaced_comparisons(tokens: Vec<Token>) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        if t.token_type == TokenType::ASSIGN {
+            if let Some(prev) = out.last_mut() {
+                let fused = match prev.token_type {
+                    TokenType::GT => Some((TokenType::GE, ">=")),
+                    TokenType::LT => Some((TokenType::LE, "<=")),
+                    _ => None,
+                };
+                if let Some((token_type, text)) = fused {
+                    prev.token_type = token_type;
+                    prev.text = text.to_string();
+                    prev.end_line = t.end_line;
+                    prev.end_column = t.end_column;
+                    prev.end_byte = t.end_byte;
+                    continue;
+                }
+            }
+        }
+        out.push(t);
+    }
+    out
+}
+
 /// Output stem for a source path: the file name minus a `.sas` / `.txt`
 /// extension (case-insensitive).
 pub fn output_stem(path: &Path) -> String {
@@ -821,7 +848,7 @@ pub fn output_stem(path: &Path) -> String {
 }
 
 pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
-    let tokens = TokenStream::tokenize(source).default;
+    let tokens = fuse_spaced_comparisons(TokenStream::tokenize(source).default);
     let arrays = collect_array_decls(&tokens);
     let self_declared = collect_self_declared(&tokens);
     let assigned = collect_assigned(&tokens);
@@ -836,7 +863,13 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
         defs: Vec::new(),
         computed: HashSet::new(),
     };
-    walker.walk(0, &[], &[]);
+    // An `end;` left unmatched at the top level (a validity guard
+    // commented out above its block) closes nothing: SAS is run with the
+    // body balanced by an unconditional `do;`, so the walk carries on.
+    let mut i = 0;
+    while i < tokens.len() {
+        i = walker.walk(i, &[], &[]) + 1;
+    }
     let Walker {
         used,
         preds: mut predicates,
@@ -1230,7 +1263,7 @@ fn substitute_cached(
             let defs = &derived[&a.var];
             if defs
                 .iter()
-                .any(|d| matches!(d.value, DefValue::Add(_) | DefValue::AddVar(_)))
+                .any(|d| matches!(d.value, DefValue::Add(_) | DefValue::AddVar(..)))
             {
                 let out = substitute_counter(a, defs, derived, depth, cache)
                     .filter(|p| pred_size(p) <= DERIVED_BUDGET)
@@ -1273,7 +1306,7 @@ fn substitute_cached(
                         cache,
                     )),
                     // X = Y * k, so `X op v` is `Y op v/k`, turned round for k < 0.
-                    DefValue::Add(_) | DefValue::AddVar(_) => {
+                    DefValue::Add(_) | DefValue::AddVar(..) => {
                         unreachable!("counters are substituted above")
                     }
                     // The constant plus one count term per value of each
@@ -1462,7 +1495,7 @@ fn substitute_counter(
             .collect()
     };
     let resets: Vec<usize> = (0..defs.len())
-        .filter(|&i| !matches!(defs[i].value, DefValue::Add(_) | DefValue::AddVar(_)))
+        .filter(|&i| !matches!(defs[i].value, DefValue::Add(_) | DefValue::AddVar(..)))
         .collect();
     let mut alts = Vec::new();
     'reset: for &i in &resets {
@@ -1490,7 +1523,7 @@ fn substitute_counter(
                 match &d.value {
                     DefValue::Add(k) if own.is_empty() => base += k,
                     DefValue::Add(k) => terms.push((Pred::And(recur(own)), *k)),
-                    DefValue::AddVar(y) => {
+                    DefValue::AddVar(y, offset) => {
                         // One term per value `y` can take. A missing `y`
                         // would leave the counter missing; requiring it
                         // present outright (not just when the step runs)
@@ -1508,10 +1541,10 @@ fn substitute_counter(
                         let values =
                             listed_values(y, own).or_else(|| counter_values(y, derived))?;
                         for v in values {
-                            if v != 0.0 {
+                            if v + offset != 0.0 {
                                 let mut when = own.to_vec();
                                 when.push(is(Value::number(v)));
-                                terms.push((Pred::And(recur(&when)), v));
+                                terms.push((Pred::And(recur(&when)), v + offset));
                             }
                         }
                     }
@@ -1621,23 +1654,67 @@ fn pick_count(c: &CountAtom, fixed: &[Atom], rng: &mut Rng) -> Pred {
         .copied()
         .filter(|&t| count_accepts(c, t))
         .collect();
-    let Some(&goal) = rng.choose(&goals) else {
+    if goals.is_empty() {
         return Pred::Tautology;
-    };
+    }
+    // The table above treats steps as independent, but steps on one input
+    // (`a = 1`, `a = 3`) exclude each other, so a total can be reachable
+    // only by picks that contradict. Walk to a total keeping the picks
+    // consistent, and try again when that walk runs out of choices.
+    let mut last = None;
+    for _ in 0..COUNT_PICK_TRIES {
+        let goal = *rng.choose(&goals).unwrap();
+        let (picks, consistent) = walk_count(c, &reachable, &take, &skip, goal, fixed, rng);
+        if consistent {
+            return picks;
+        }
+        last = Some(picks);
+    }
+    last.unwrap()
+}
+
+/// Tries [`pick_count`] makes at a consistent choice of steps.
+const COUNT_PICK_TRIES: usize = 8;
+
+/// Steps of `c` reaching `goal`, chosen last to first: each taken or
+/// skipped as `reachable` allows, preferring choices the picks so far
+/// (and `fixed`) leave open. Also whether every choice could be.
+fn walk_count(
+    c: &CountAtom,
+    reachable: &[BTreeSet<i64>],
+    take: &[bool],
+    skip: &[bool],
+    goal: i64,
+    fixed: &[Atom],
+    rng: &mut Rng,
+) -> (Pred, bool) {
     let mut need = goal;
     let mut picks = Vec::with_capacity(c.terms.len());
+    let mut bound = fixed.to_vec();
+    let mut consistent = true;
     for (j, (p, k)) in c.terms.iter().enumerate().rev() {
-        let take = take[j] && reachable[j].contains(&(need - milli(*k)));
-        let skip = skip[j] && reachable[j].contains(&need);
-        if take && (!skip || rng.below(2) == 0) {
-            need -= milli(*k);
-            picks.push(positive(p));
+        let taken = positive(p);
+        let skipped = negate(step_condition(p));
+        let mut take = take[j] && reachable[j].contains(&(need - milli(*k)));
+        let mut skip = skip[j] && reachable[j].contains(&need);
+        let take_open = take && !contradicts(&taken, &bound);
+        let skip_open = skip && !contradicts(&skipped, &bound);
+        if take_open || skip_open {
+            (take, skip) = (take_open, skip_open);
         } else {
-            picks.push(negate(step_condition(p)));
+            consistent = false;
         }
+        let pick = if take && (!skip || rng.below(2) == 0) {
+            need -= milli(*k);
+            taken
+        } else {
+            skipped
+        };
+        conjunct_atoms(&pick, &mut bound);
+        picks.push(pick);
     }
     picks.reverse();
-    Pred::And(picks)
+    (Pred::And(picks), consistent)
 }
 
 /// Totals in thousandths, so sums of decimal steps compare exactly.
@@ -1881,8 +1958,9 @@ enum DefValue {
     Scaled(String, f64),
     /// `X = X + k` (also `k + X`, `X - k`): a counter step.
     Add(f64),
-    /// `X = X + Y` (also `Y + X`): a counter step by a derived variable.
-    AddVar(String),
+    /// `X = X + Y` (also `Y + X`, `X + Y - k`): a counter step by a
+    /// variable, plus a constant.
+    AddVar(String, f64),
     /// The value a declared input arrives with.
     Input,
     /// `X = k - (a + b) + c …`: a constant plus each variable times its
@@ -1913,11 +1991,11 @@ enum Operand {
 
 enum Step {
     By(f64),
-    ByVar(String),
+    ByVar(String, f64),
 }
 
-/// `X + k`, `k + X`, `X - k`, `X + Y` or `Y + X` for counter `X`, as its
-/// step, from the tokens between `=` and `;`.
+/// `X + k`, `k + X`, `X - k`, `X + Y`, `Y + X` or `X + Y ± k` for
+/// counter `X`, as its step, from the tokens between `=` and `;`.
 fn counter_step(var: &str, rhs: &[Token]) -> Option<Step> {
     let num = |t: &Token| match t.token_type {
         TokenType::IntegerLiteral | TokenType::FloatLiteral | TokenType::FloatExponentLiteral => {
@@ -1927,7 +2005,7 @@ fn counter_step(var: &str, rhs: &[Token]) -> Option<Step> {
     };
     let is_var = |t: &Token| t.token_type == TokenType::Identifier && t.text == var;
     let step = |t: &Token| match t.token_type {
-        TokenType::Identifier if t.text != var => Some(Step::ByVar(t.text.clone())),
+        TokenType::Identifier if t.text != var => Some(Step::ByVar(t.text.clone(), 0.0)),
         _ => num(t).map(Step::By),
     };
     match rhs {
@@ -1936,6 +2014,19 @@ fn counter_step(var: &str, rhs: &[Token]) -> Option<Step> {
             num(k).map(|k| Step::By(-k))
         }
         [k, op, x] if is_var(x) && op.token_type == TokenType::PLUS => step(k),
+        [x, plus, y, sign, k]
+            if is_var(x)
+                && plus.token_type == TokenType::PLUS
+                && y.token_type == TokenType::Identifier
+                && y.text != var =>
+        {
+            let k = num(k)?;
+            match sign.token_type {
+                TokenType::PLUS => Some(Step::ByVar(y.text.clone(), k)),
+                TokenType::MINUS => Some(Step::ByVar(y.text.clone(), -k)),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -2144,7 +2235,7 @@ impl Walker<'_> {
                     let rhs = &tokens[i + 2..end];
                     let step = counter_step(&var, rhs).map(|step| match step {
                         Step::By(k) => DefValue::Add(k),
-                        Step::ByVar(y) => DefValue::AddVar(resolve_alias(self.aliases, y)),
+                        Step::ByVar(y, k) => DefValue::AddVar(resolve_alias(self.aliases, y), k),
                     });
                     step.or_else(|| {
                         scaled_copy(rhs)
@@ -2217,7 +2308,9 @@ impl Walker<'_> {
                     Some(step) => {
                         let value = match step {
                             Step::By(k) => DefValue::Add(k),
-                            Step::ByVar(y) => DefValue::AddVar(resolve_alias(self.aliases, y)),
+                            Step::ByVar(y, k) => {
+                                DefValue::AddVar(resolve_alias(self.aliases, y), k)
+                            }
                         };
                         let cond = then_arm
                             .clone()
@@ -3875,6 +3968,26 @@ mod tests {
     }
 
     #[test]
+    fn spaced_comparisons_read_as_one_operator() {
+        let g = graph("if a > = 0 and b < = 3 then ok = 1;\n");
+        assert!(matches!(&g.predicates[0], Pred::And(c)
+            if matches!(&c[0], Pred::Atom(a) if a.var == "a" && a.op == Op::Ge)
+            && matches!(&c[1], Pred::Atom(a) if a.var == "b" && a.op == Op::Le)));
+    }
+
+    #[test]
+    fn statements_after_an_unmatched_end_are_walked() {
+        let g = graph(
+            "* if a in (0,1) then do;\n\
+             if a = 1 then x = 1;\n\
+             end;\n\
+             if b = 1 then y = 1;\n",
+        );
+        assert_eq!(g.inputs, vec!["a", "b"]);
+        assert_eq!(g.branches.len(), 2);
+    }
+
+    #[test]
     fn chained_ranges_may_start_at_missing() {
         // `. <= days` holds for every value, missing included.
         let g = graph("if (. <= days <= 7) then ok = 1;\n");
@@ -4294,6 +4407,25 @@ mod tests {
             assert_eq!(c[0], eq1("a"), "seed {seed}");
             assert_eq!(c[1], negate(&eq1("b")), "seed {seed}");
         }
+    }
+
+    #[test]
+    fn counts_keep_one_arm_of_each_inputs_else_if_chain() {
+        // A total of 0 needs every input's `+0` arm: skipping one leaves
+        // its input no value the guard allows.
+        let mut src =
+            String::from("if a in (0,1,2) and b in (0,1,2) and c in (0,1,2) then do;\nn = 0;\n");
+        for v in ["a", "b", "c"] {
+            src += &format!(
+                "if {v} = 0 then n = n + 0;\n\
+                 else if {v} = 1 then n = n + 1;\n\
+                 else if {v} = 2 then n = n + 2;\n"
+            );
+        }
+        src += "if n = 0 then none = 1;\nend;\n";
+        let (rows, cov) = minimal_rows(&src);
+        assert!(cov.unproduced.is_empty(), "{:?}", cov.unproduced);
+        assert!(rows.iter().any(|r| r.iter().all(|v| v == "0")));
     }
 
     #[test]
