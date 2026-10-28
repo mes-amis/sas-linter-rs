@@ -59,6 +59,7 @@ const PAIRS: &[(&str, &str)] = &[
         "proc_statement_missing_semicolon",
     ),
     ("orphan_format_range", "orphan_format_range"),
+    ("statement_not_valid", "statement_not_valid"),
     ("undefined_format", "undefined_format"),
     ("unreachable_else_if_branch", "unreachable_else_if_branch"),
     (

@@ -264,6 +264,9 @@ rules:
     enabled: true
     autofix: false             # remove the stray `;` that closed the value statement early
 
+  statement_not_valid:
+    enabled: true              # data steps and open code only; PROC bodies are skipped
+
   undefined_format:
     enabled: true              # skipped when the file has no proc format, or uses fmtsearch / %include
 
@@ -396,6 +399,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `inconsistent_variable_case` | Identifier appears with more than one casing in the same file (`myVar` vs `MyVar`). SAS treats both as the same variable; autofix rewrites every minority spelling to the most-common form. Skips proc-format definitions and `format.` / `lib.member` references. |
 | `format_for_unknown_variable` | `format` / `informat` / `attrib` / `label` statement assigns a format or label to a variable that's referenced nowhere else in the file — almost always a typo. Skipped on files that pull in columns via `set` / `merge` / `update` / `infile` / `input`. |
 | `orphan_format_range` | Inside `proc format`, a statement that starts with a literal, range, `low` / `high` or `other` followed by `=`, right after a `value` / `invalue` / `picture` statement — a stray `;` closed the definition early and SAS fails with `ERROR 180-322`. Autofix removes that `;`. |
+| `statement_not_valid` | A statement in open code or a data step that doesn't start like any SAS statement — bare text (a filename line above the header), stray punctuation (`*/.`), a `*` comment cut short by an embedded `;`. Accepts keywords, assignments (`x =`, `a{i} =`, `'n'n =`), sum statements, labels, hash method calls and macro code. PROC bodies are skipped; `run;` ends a PROC except run-group PROCs (`datasets`, `reg`, `sql`, …), which end at `quit;`. SAS fails with `ERROR 180-322`. Report-only. |
 | `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.

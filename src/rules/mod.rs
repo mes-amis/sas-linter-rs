@@ -21,6 +21,7 @@ pub mod orphan_format_range;
 pub mod proc_statement_missing_semicolon;
 pub mod source_headers;
 pub mod star_comment_swallows_code;
+pub mod statement_not_valid;
 pub mod tab_expansion;
 pub mod trailing_whitespace;
 pub mod unbalanced_do_block;
@@ -68,6 +69,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         proc_statement_missing_semicolon::meta(),
         undefined_format::meta(),
         orphan_format_range::meta(),
+        statement_not_valid::meta(),
     ]
 }
 
