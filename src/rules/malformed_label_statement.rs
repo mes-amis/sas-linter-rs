@@ -11,7 +11,8 @@ pub struct MalformedLabelStatement {
 }
 
 const ID: &str = "malformed_label_statement";
-const DESCRIPTION: &str = "`label` statement missing `=` between variable and string literal.";
+const DESCRIPTION: &str = "`label` statement missing `=` between variable and string literal, \
+                            or missing its terminating `;` so it swallows the next statement.";
 
 pub fn meta() -> RuleMeta {
     RuleMeta {
@@ -57,6 +58,20 @@ impl Rule for MalformedLabelStatement {
                 severity: Severity::Warning,
             });
         }
+        for (_, keyword) in unterminated_labels(&ctx.tokens.default) {
+            findings.push(Finding {
+                path: ctx.path.to_string(),
+                line: keyword.start_line,
+                column: keyword.start_column + 1,
+                rule: ID,
+                message: format!(
+                    "`label` statement is missing its terminating `;` before `{}` — \
+                     the `{}` statement is read as part of the label.",
+                    keyword.text, keyword.text
+                ),
+                severity: Severity::Warning,
+            });
+        }
         findings
     }
 
@@ -64,6 +79,7 @@ impl Rule for MalformedLabelStatement {
         if source.is_empty() {
             return source.to_string();
         }
+        let source = &insert_label_semicolons(source);
         let stream = TokenStream::tokenize(source);
         let mut lines: Vec<String> = source.split('\n').map(|s| s.to_string()).collect();
 
@@ -129,6 +145,66 @@ fn label_violations(tokens: &[Token]) -> Vec<(Token, Token)> {
             j += 1;
         }
         i = j + 1;
+    }
+    out
+}
+
+/// Statement keywords that can't continue a `label` statement. Seeing one
+/// right after a label string means the `;` closing the label is missing.
+const STATEMENT_KEYWORDS: &[TokenType] = &[
+    TokenType::KwLabel,
+    TokenType::KwAttrib,
+    TokenType::KwFormat,
+    TokenType::KwInformat,
+    TokenType::KwLength,
+    TokenType::KwIf,
+    TokenType::KwElse,
+    TokenType::KwDo,
+    TokenType::KwEnd,
+    TokenType::KwDrop,
+    TokenType::KwKeep,
+    TokenType::KwRun,
+];
+
+/// `(string, keyword)` pairs where a `label` statement's string is followed
+/// by a statement keyword. A keyword followed by `=` is a variable that
+/// happens to share the name (`label los = 'x' length = 'y'`), not a new
+/// statement.
+fn unterminated_labels(tokens: &[Token]) -> Vec<(Token, Token)> {
+    let mut out = Vec::new();
+    let mut in_label = false;
+    for (j, t) in tokens.iter().enumerate() {
+        match t.token_type {
+            TokenType::SEMI => in_label = false,
+            TokenType::KwLabel if !in_label => in_label = true,
+            TokenType::StringLiteral if in_label => {
+                let (Some(kw), next) = (tokens.get(j + 1), tokens.get(j + 2)) else {
+                    continue;
+                };
+                if STATEMENT_KEYWORDS.contains(&kw.token_type)
+                    && next.map(|n| n.token_type) != Some(TokenType::ASSIGN)
+                {
+                    out.push((t.clone(), kw.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Insert the missing `;` straight after each label string that runs into
+/// a statement keyword.
+fn insert_label_semicolons(source: &str) -> String {
+    let stream = TokenStream::tokenize(source);
+    let mut out = source.to_string();
+    let mut ends: Vec<usize> = unterminated_labels(&stream.default)
+        .into_iter()
+        .map(|(string, _)| string.end_byte as usize)
+        .collect();
+    ends.sort_unstable_by(|a, b| b.cmp(a));
+    for end in ends {
+        out.insert(end, ';');
     }
     out
 }
