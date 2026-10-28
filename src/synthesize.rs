@@ -2477,7 +2477,7 @@ impl<'a> PredicateParser<'a> {
             }
             self.i = save;
         }
-        if ty(self.t, self.i).is_some_and(is_literal)
+        if ty(self.t, self.i).is_some_and(|t| is_literal(t) || t == TokenType::DOT)
             && ty(self.t, self.i + 1).and_then(cmp_op).is_some()
             && self.peek_at(self.i + 2, TokenType::Identifier)
             && !self.peek_at(self.i + 3, TokenType::LPAREN)
@@ -2554,13 +2554,14 @@ impl<'a> PredicateParser<'a> {
     }
 
     /// `LIT op IDENT`, optionally chained as `LIT op IDENT op LIT`
-    /// (`5 le bmi le 70`): the comparison is turned round to read
-    /// `IDENT op' LIT`, and a chain becomes the conjunction of both ends.
+    /// (`5 le bmi le 70`, `. <= days <= 7`): the comparison is turned round
+    /// to read `IDENT op' LIT`, and a chain becomes the conjunction of both
+    /// ends.
     fn parse_literal_first_atom(&mut self) -> Pred {
-        let lo = parse_lit(&self.t[self.i]);
-        let op = flip(cmp_op(self.t[self.i + 1].token_type).expect("checked by caller"));
-        let var = self.t[self.i + 2].text.clone();
-        self.i += 3;
+        let lo = self.consume_literal().expect("checked by caller");
+        let op = flip(cmp_op(self.t[self.i].token_type).expect("checked by caller"));
+        let var = self.t[self.i + 1].text.clone();
+        self.i += 2;
         let first = self.atom(var.clone(), op, vec![lo]);
         if let Some(op2) = ty(self.t, self.i).and_then(cmp_op) {
             let save = self.i;
@@ -3733,6 +3734,20 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| num(&r[0]) > 0.0 && (5.0..=70.0).contains(&num(&r[1]))));
+    }
+
+    #[test]
+    fn chained_ranges_may_start_at_missing() {
+        // `. <= days` holds for every value, missing included.
+        let g = graph("if (. <= days <= 7) then ok = 1;\n");
+        assert!(matches!(&g.predicates[0], Pred::And(c)
+            if matches!(&c[0], Pred::Atom(a) if a.var == "days" && a.op == Op::Ge
+                && a.values == vec![Value::Missing])));
+        let (rows, cov) = minimal_rows("if (. <= days <= 7) then do; ok = 1; end;\n");
+        assert!(cov.uncovered.is_empty());
+        assert!(rows
+            .iter()
+            .any(|r| r[0].is_empty() || r[0].parse::<f64>().is_ok_and(|d| d <= 7.0)));
     }
 
     #[test]
