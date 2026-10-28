@@ -102,3 +102,41 @@ fn name_and_positional_ranges_reference_their_endpoints() {
                format b--d 8.;\n format b-numeric-d 8.;\nrun;\n";
     assert!(findings(src).is_empty(), "{:?}", findings(src));
 }
+
+#[test]
+fn conditional_reads_count_as_external_input() {
+    // `set` / `input` needn't start the statement to read variables in.
+    for read in [
+        "if _n_ = 1 then set lookup;",
+        "if x then y = 1; else set other;",
+        "next: input a b;",
+    ] {
+        let src = format!("data foo;\n {read}\n label anything = 'x';\nrun;\n");
+        assert!(findings(&src).is_empty(), "{read}: {:?}", findings(&src));
+    }
+}
+
+#[test]
+fn proc_statements_are_not_external_input() {
+    // PROC SQL's `update … set` reads nothing into a data step.
+    let src = "proc sql;\n update t set a = 1;\nquit;\n\
+               data foo;\n x = 1;\n label typo = 'T';\nrun;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!(f[0].line, 6);
+}
+
+#[test]
+fn a_proc_ends_at_run_or_its_last_statement() {
+    // Fragments follow a PROC with the data-step body and no `data`
+    // statement: after `run;`, or straight after a `run;`-less PROC FORMAT.
+    for proc in [
+        "proc sort data = a;\n by k;\nrun;\n",
+        "proc format;\n value f 0 = 'a';\n",
+    ] {
+        let src = format!("{proc}x = 1;\nformat typo f.;\n");
+        let f = findings(&src);
+        assert_eq!(f.len(), 1, "{proc}: {:?}", f);
+        assert!(f[0].message.contains("`typo`"), "{:?}", f[0]);
+    }
+}

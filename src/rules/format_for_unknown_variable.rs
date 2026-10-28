@@ -59,16 +59,43 @@ impl FormatKind {
     }
 }
 
-fn is_external_input(t: TokenType) -> bool {
+fn is_external_input(t: &Token) -> bool {
     matches!(
-        t,
+        t.token_type,
         TokenType::KwSet
             | TokenType::KwMerge
             | TokenType::KwUpdate
             | TokenType::KwInfile
             | TokenType::KwInput
-    )
+    ) || (t.token_type == TokenType::Identifier && t.text.eq_ignore_ascii_case("modify"))
 }
+
+/// Does this data-step statement read variables in from outside the file?
+/// The reading statement may be the whole statement, or the one generated
+/// by `if … then`, `else`, `otherwise` or a label — `if _n_ = 1 then set
+/// lookup;`. A following `(` or `=` makes the word a function (`input(…)`)
+/// or a variable instead.
+fn reads_external_input(stmt: &[Token]) -> bool {
+    stmt.iter().enumerate().any(|(j, t)| {
+        is_external_input(t)
+            && !matches!(
+                stmt.get(j + 1).map(|n| n.token_type),
+                Some(TokenType::LPAREN | TokenType::ASSIGN)
+            )
+            && (j == 0
+                || matches!(
+                    stmt[j - 1].token_type,
+                    TokenType::KwThen | TokenType::KwElse | TokenType::COLON
+                )
+                || stmt[j - 1].text.eq_ignore_ascii_case("otherwise"))
+    })
+}
+
+/// PROCs that keep running past `run;` until `quit;` (or the next step).
+const RUN_GROUP_PROCS: &[&str] = &["datasets", "ds2", "iml", "optmodel", "sql"];
+
+/// Every statement PROC FORMAT accepts after the PROC statement itself.
+const FORMAT_STATEMENTS: &[&str] = &["value", "invalue", "picture", "select", "exclude"];
 
 fn is_declaration_opener(t: &Token) -> bool {
     matches!(
@@ -102,21 +129,50 @@ impl Rule for FormatForUnknownVariable {
         let mut targets: Vec<Target> = Vec::new();
         let mut use_names: HashSet<String> = HashSet::new();
         // PROC statements name the input dataset's variables, which the file
-        // needn't mention anywhere else. A PROC runs until the next step.
-        let mut in_proc = false;
+        // needn't mention anywhere else. Holds the PROC's name; a PROC runs
+        // until `run;` (`quit;` for run-group PROCs) or the next step.
+        let mut proc: Option<String> = None;
 
         for stmt in iter_statements(tokens) {
             if stmt.is_empty() {
                 continue;
             }
             let opener = &stmt[0];
+            let next = stmt.get(1).map(|n| n.token_type);
             match opener.token_type {
-                TokenType::KwProc => in_proc = true,
-                TokenType::KwData => in_proc = false,
+                TokenType::KwProc => {
+                    proc = Some(
+                        stmt.get(1)
+                            .map(|n| n.text.to_lowercase())
+                            .unwrap_or_default(),
+                    )
+                }
+                TokenType::KwData if next != Some(TokenType::ASSIGN) => proc = None,
+                TokenType::KwRun
+                    if stmt.len() == 1
+                        && !proc
+                            .as_deref()
+                            .is_some_and(|p| RUN_GROUP_PROCS.contains(&p)) =>
+                {
+                    proc = None
+                }
+                TokenType::KwQuit if stmt.len() == 1 => proc = None,
+                // Sources commonly open with a `run;`-less `proc format;
+                // value …;` and continue straight into the data-step body;
+                // PROC FORMAT has a closed statement vocabulary, so anything
+                // else ends it.
+                _ if proc.as_deref() == Some("format")
+                    && !FORMAT_STATEMENTS.contains(&opener.text.to_lowercase().as_str()) =>
+                {
+                    proc = None
+                }
                 _ => {}
             }
-            if is_external_input(opener.token_type) {
+            let in_proc = proc.is_some();
+            if !in_proc && reads_external_input(stmt) {
                 external_input = true;
+            }
+            if is_external_input(opener) && next != Some(TokenType::ASSIGN) {
                 continue;
             }
             if let Some(kind) = FormatKind::from_type(opener.token_type) {
