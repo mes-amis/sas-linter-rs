@@ -174,13 +174,20 @@ assignment to the variable is a constant (`flag = 1;`, `flag = .;`), a copy
 becomes the conditions under which one of the assignments giving 0 or 1
 runs and no later assignment overrides it. A sum or difference of
 variables and constants (`n = 7 - (a + b);`, or of comparisons,
-`n = (a = 0) + (b = 0);`) is rewritten as a count over the values each
-variable's guard or catalog spec lists, and is missing when any variable
-is; `n = sum(a, b);` skips missing arguments and is missing only when all
-are. `x not in (…)` and `x not eq k` are the negated comparisons. A counter (`n = 0;` then
+`n = (a = 0) + (b = 0);`) is rewritten over the values each variable's
+guard or catalog spec lists, or that a derived variable can be given
+(`x = iD1 - 1;` then `n = x + y;`), and is missing when any variable is;
+`n = sum(a, b, max(of c d));` skips missing arguments and is missing only
+when all are. A sum with few combinations of values becomes one
+alternative per combination the comparison accepts; a larger one becomes
+a count. `a - b ge 1` compares the difference of two variables, and
+`x > = 0` is read as `x >= 0`, as SAS does. `x not in (…)` and
+`x not eq k` are the negated comparisons. A counter (`n = 0;` then
 `if c then n = n + 1;` or the sum statement `if c then n + 1;`, or
-`n = n + x` by a variable whose guard lists its values) is rewritten as a count of the steps whose conditions hold, so
-`n ge 2` becomes "at least two of those conditions". A declared input
+`n = n + x - 1` by a variable whose guard lists its values) is rewritten
+as a count of the steps whose conditions hold, so `n ge 2` becomes "at
+least two of those conditions". An `end;` left unmatched by a validity
+guard commented out above it doesn't end the program. A declared input
 (`x = x;`) that the source also assigns keeps its input value unless one
 of those assignments runs.
 
