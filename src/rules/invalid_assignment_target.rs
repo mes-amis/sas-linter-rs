@@ -4,7 +4,7 @@ use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
 
-use super::RuleMeta;
+use super::{statement_not_valid, RuleMeta};
 
 pub struct InvalidAssignmentTarget {
     autofix: bool,
@@ -28,38 +28,6 @@ pub fn meta() -> RuleMeta {
         },
     }
 }
-
-/// Data-step statement keywords that sas-lexer lexes as plain `Identifier`
-/// (no dedicated `Kw*` token type). A statement opening with one of these
-/// is a keyword statement whose options may legitimately look like
-/// `IDENT IDENT = value` — e.g. `file log linesize = 80;` — so it must
-/// not be read as a botched assignment.
-const STATEMENT_HEAD_IDENTS: &[&str] = &[
-    "abort",
-    "continue",
-    "display",
-    "dm",
-    "error",
-    "file",
-    "footnote",
-    "goptions",
-    "goto",
-    "leave",
-    "link",
-    "list",
-    "lostcard",
-    "modify",
-    "options",
-    "otherwise",
-    "putlog",
-    "redirect",
-    "remove",
-    "retain",
-    "return",
-    "skip",
-    "title",
-    "window",
-];
 
 impl Rule for InvalidAssignmentTarget {
     fn id(&self) -> &'static str {
@@ -142,7 +110,7 @@ fn joined_name(run: &[&Token]) -> String {
 /// (`drop`, `label`, `rename`, `format`, ...), so a statement whose first
 /// token is a plain `Identifier` can only be an assignment, a sum
 /// statement, or one of the few keyword statements the lexer doesn't
-/// special-case (see `STATEMENT_HEAD_IDENTS`).
+/// special-case (`statement_not_valid::is_statement_word`).
 fn offenders(tokens: &[Token]) -> Vec<Vec<&Token>> {
     let mut out = Vec::new();
     let mut in_data_step = false;
@@ -167,9 +135,10 @@ fn offenders(tokens: &[Token]) -> Vec<Vec<&Token>> {
                         j += 1;
                     }
                     let run: Vec<&Token> = tokens[i..j].iter().collect();
-                    let head_is_keyword = STATEMENT_HEAD_IDENTS
-                        .iter()
-                        .any(|kw| run[0].text.eq_ignore_ascii_case(kw));
+                    // A statement the lexer leaves as identifiers, whose
+                    // options look like `IDENT IDENT = value` (`file log
+                    // linesize = 80;`, `title1 j = c "x";`).
+                    let head_is_keyword = statement_not_valid::is_statement_word(&run[0].text);
                     if run.len() >= 2
                         && !head_is_keyword
                         && tokens.get(j).map(|n| n.token_type) == Some(TokenType::ASSIGN)
@@ -267,6 +236,14 @@ mod tests {
     fn silent_on_keyword_led_statements() {
         let src = "data one;\n  label risk = 'Predicted risk';\n  rename old = new;\nrun;\n";
         assert!(check(src).is_empty());
+    }
+
+    #[test]
+    fn silent_on_global_statements_inside_a_data_step() {
+        let src = "data a;\n title1 j = c \"Report\";\n footnote2 h = 2 \"x\";\n\
+                   ods html body = \"out.html\";\n redirect input old = new;\n x = 1;\nrun;\n";
+        assert!(check(src).is_empty(), "{:?}", check(src));
+        assert_eq!(fix(src), src);
     }
 
     #[test]

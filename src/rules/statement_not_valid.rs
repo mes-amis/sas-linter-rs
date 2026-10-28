@@ -54,6 +54,7 @@ const STATEMENT_WORDS: &[&str] = &[
     "otherwise",
     "page",
     "putlog",
+    "redirect",
     "remove",
     "replace",
     "resetline",
@@ -64,6 +65,7 @@ const STATEMENT_WORDS: &[&str] = &[
     "signoff",
     "signon",
     "skip",
+    "sysecho",
     "systask",
     "waitfor",
     "window",
@@ -231,7 +233,8 @@ pub(crate) fn starts_validly(stmt: &[Token]) -> bool {
     }
 }
 
-fn is_statement_word(text: &str) -> bool {
+/// A statement name the lexer leaves as a plain identifier.
+pub(crate) fn is_statement_word(text: &str) -> bool {
     let word = text.to_lowercase();
     if STATEMENT_WORDS.contains(&word.as_str()) {
         return true;
