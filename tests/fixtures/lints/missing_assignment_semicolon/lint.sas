@@ -1,6 +1,6 @@
 data foo;
    set bar;
-   Q1 = Q1     **  Comatose;
+   Q1 = Q1     **  Comatose state;
    Q3 = Q3;    **  Daily decision-making;
    P2 = P2;  **  Tube feeding;
    X = Y ** 2;

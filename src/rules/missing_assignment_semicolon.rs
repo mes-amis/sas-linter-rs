@@ -43,100 +43,69 @@ impl Rule for MissingAssignmentSemicolon {
     }
 
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        let lines: Vec<&str> = ctx.source.split('\n').collect();
-        for (t, prev, next) in star2_offenders(&ctx.tokens.default, &lines) {
-            findings.push(Finding {
-                path: ctx.path.to_string(),
-                line: t.start_line,
-                column: t.start_column + 1,
-                rule: ID,
-                message: format!(
-                    "`**` parsed as exponentiation in `{} ** {}` — looks like a \
-                     missing `;` before an inline `** ... ;` comment.",
-                    prev.text, next.text
-                ),
-                severity: Severity::Warning,
-            });
-        }
-        for (t, prev, next) in star_offenders(&ctx.tokens.default) {
-            findings.push(Finding {
-                path: ctx.path.to_string(),
-                line: t.start_line,
-                column: t.start_column + 1,
-                rule: ID,
-                message: format!(
-                    "`*` parsed as multiplication in `{} * {} …` — looks like a \
-                     missing `;` before an inline `* ... ;` comment.",
-                    prev.text, next.text
-                ),
-                severity: Severity::Warning,
-            });
-        }
-        findings
+        offenders(&ctx.tokens.default)
+            .into_iter()
+            .map(|(t, prev, next)| {
+                let (op, reads_as) = if t.token_type == TokenType::STAR2 {
+                    ("**", "exponentiation")
+                } else {
+                    ("*", "multiplication")
+                };
+                Finding {
+                    path: ctx.path.to_string(),
+                    line: t.start_line,
+                    column: t.start_column + 1,
+                    rule: ID,
+                    message: format!(
+                        "`{op}` parsed as {reads_as} in `{} {op} {} …` — looks like a \
+                         missing `;` before an inline `{op} ... ;` comment.",
+                        prev.text, next.text
+                    ),
+                    severity: Severity::Warning,
+                }
+            })
+            .collect()
     }
 
+    /// Terminate each offending assignment straight after the operand that
+    /// precedes its `*` / `**`, turning the rest into a comment statement.
+    /// Where two or more blanks precede the marker, the `;` takes one of
+    /// them so the comment keeps its column.
     fn autofix(&self, source: &str) -> String {
-        if source.is_empty() {
-            return source.to_string();
-        }
         let stream = TokenStream::tokenize(source);
-        let mut lines: Vec<String> = source.split('\n').map(|s| s.to_string()).collect();
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let mut edits: Vec<(usize, u32)> = star2_offenders(&stream.default, &line_refs)
+        let mut ends: Vec<usize> = offenders(&stream.default)
             .into_iter()
-            .map(|(_, prev, _)| {
-                (
-                    (prev.start_line as usize).saturating_sub(1),
-                    prev.end_column,
-                )
-            })
+            .map(|(_, prev, _)| prev.end_byte as usize)
             .collect();
-        // Apply within a line right-to-left.
-        edits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-
-        for (line_idx, col) in edits {
-            let Some(line) = lines.get_mut(line_idx) else {
-                continue;
-            };
-            let chars: Vec<char> = line.chars().collect();
-            let col = col as usize;
-            if col > chars.len() {
-                continue;
-            }
-            let before: String = chars[..col].iter().collect();
-            let after: String = chars[col..].iter().collect();
-            // Patterns from Ruby:
-            //   two+ spaces between IDENT and `**`: consume one for `;`
-            //   exactly one space: keep it after the `;`
-            //   no space: inject `; `
-            let replacement = if let Some(rest) = after.strip_prefix("  ") {
-                format!("; {}", rest)
-            } else if let Some(rest) = after.strip_prefix(' ') {
-                format!("; {}", rest)
-            } else {
-                format!("; {}", after)
-            };
-            *line = format!("{}{}", before, replacement);
+        ends.sort_unstable_by(|a, b| b.cmp(a));
+        let mut out = source.to_string();
+        for end in ends {
+            let spare_blank = out[end..].starts_with("  ");
+            out.replace_range(end..end + usize::from(spare_blank), ";");
         }
-        insert_star_semicolons(&lines.join("\n"))
+        out
     }
 }
 
-/// Words that may legitimately follow an operand inside an expression, so a
-/// pair of bare words containing one isn't comment prose.
+/// Words that act as operators inside an expression. `in` only does when
+/// a `(` list follows it.
 const OPERATOR_WORDS: &[&str] = &[
-    "and", "or", "not", "eq", "ne", "lt", "le", "gt", "ge", "in", "min", "max", "then", "else",
-    "to", "by", "while", "until",
+    "and", "or", "not", "eq", "ne", "lt", "le", "gt", "ge", "min", "max",
 ];
 
-fn is_bare_word(t: &Token) -> bool {
+/// An identifier-shaped token at `tokens[i]` that isn't acting as an
+/// operator — an operand, or a word of comment prose.
+fn is_bare_word(tokens: &[Token], i: usize) -> bool {
+    let t = &tokens[i];
     let mut chars = t.text.chars();
-    chars
+    let word_shaped = chars
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !OPERATOR_WORDS.contains(&t.text.to_ascii_lowercase().as_str())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let lower = t.text.to_ascii_lowercase();
+    let operator = OPERATOR_WORDS.contains(&lower.as_str())
+        || (lower == "in" && tokens.get(i + 1).map(|n| n.token_type) == Some(TokenType::LPAREN));
+    word_shaped && !operator
 }
 
 /// Whether the statement holding `tokens[i]` is an assignment — `VAR = …`
@@ -158,69 +127,33 @@ fn in_assignment(tokens: &[Token], i: usize) -> bool {
     })
 }
 
-/// `*` in an assignment followed by two bare words with no operator between
-/// them (`x = x * Some description;`): the text after `*` is a comment, not
-/// an operand.
-fn star_offenders(tokens: &[Token]) -> Vec<(&Token, &Token, &Token)> {
+/// `*` / `**` markers in an assignment that start comment prose. Two bare
+/// words side by side can't occur in an expression, so the first such pair
+/// in a statement is prose, and the comment starts at the last marker
+/// before it (`x = a * b ** Note on x;`). A single word stays ambiguous
+/// with a real operand (`radius ** two`) and is left alone.
+fn offenders(tokens: &[Token]) -> Vec<(&Token, &Token, &Token)> {
     let mut out = Vec::new();
-    for (i, t) in tokens.iter().enumerate() {
-        if t.token_type != TokenType::STAR || i == 0 {
-            continue;
+    let mut marker: Option<usize> = None;
+    for k in 0..tokens.len() {
+        match tokens[k].token_type {
+            TokenType::SEMI => marker = None,
+            TokenType::STAR | TokenType::STAR2 if k > 0 => marker = Some(k),
+            _ => {}
         }
-        let (Some(next), Some(after)) = (tokens.get(i + 1), tokens.get(i + 2)) else {
+        let Some(m) = marker else {
             continue;
         };
-        if is_bare_word(next) && is_bare_word(after) && in_assignment(tokens, i) {
-            out.push((t, &tokens[i - 1], next));
+        if k > m
+            && k + 1 < tokens.len()
+            && is_bare_word(tokens, k)
+            && is_bare_word(tokens, k + 1)
+            && in_assignment(tokens, m)
+        {
+            out.push((&tokens[m], &tokens[m - 1], &tokens[m + 1]));
+            // One finding per statement.
+            marker = None;
         }
-    }
-    out
-}
-
-/// Terminate each offending assignment straight after the operand that
-/// precedes its `*`, turning the rest into a `* … ;` comment statement.
-fn insert_star_semicolons(source: &str) -> String {
-    let stream = TokenStream::tokenize(source);
-    let mut ends: Vec<usize> = star_offenders(&stream.default)
-        .into_iter()
-        .map(|(_, prev, _)| prev.end_byte as usize)
-        .collect();
-    ends.sort_unstable_by(|a, b| b.cmp(a));
-    let mut out = source.to_string();
-    for end in ends {
-        out.insert(end, ';');
-    }
-    out
-}
-
-fn star2_offenders<'a>(
-    tokens: &'a [Token],
-    lines: &[&str],
-) -> Vec<(&'a Token, &'a Token, &'a Token)> {
-    let mut out = Vec::new();
-    for (i, t) in tokens.iter().enumerate() {
-        if t.token_type != TokenType::STAR2 {
-            continue;
-        }
-        let Some(line) = lines.get((t.start_line as usize).saturating_sub(1)) else {
-            continue;
-        };
-        if line.trim_start().starts_with("**") {
-            continue;
-        }
-        let (Some(prev), Some(next)) = (
-            i.checked_sub(1).and_then(|p| tokens.get(p)),
-            tokens.get(i + 1),
-        ) else {
-            continue;
-        };
-        if prev.token_type != TokenType::Identifier {
-            continue;
-        }
-        if next.token_type != TokenType::Identifier {
-            continue;
-        }
-        out.push((t, prev, next));
     }
     out
 }

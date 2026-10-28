@@ -60,3 +60,46 @@ fn autofix_terminates_the_assignment_before_the_star() {
     let src = "x = x * Some description of x;\ny = 1;\n";
     assert_eq!(autofix(src), "x = x; * Some description of x;\ny = 1;\n");
 }
+
+#[test]
+fn exponentiation_is_silent() {
+    let src = "area = radius ** two;\n\
+               y = base**power + 1;\n\
+               z = (a + b) ** 2;\n\
+               w = base\n   ** power;\n";
+    assert!(findings(src).is_empty(), "{:?}", findings(src));
+    assert_eq!(autofix(src), src);
+}
+
+#[test]
+fn flags_a_double_star_comment_ending_in_punctuation() {
+    let src = "iA = iA      **   Mobility device: cane;\n";
+    assert_eq!(findings(src).len(), 1, "{:?}", findings(src));
+}
+
+#[test]
+fn autofix_keeps_the_comment_column() {
+    // With room to spare, the `;` takes one of the blanks before the comment.
+    assert_eq!(
+        autofix("Q1 = Q1     **  Some note;\nX = X ** Other note;\n"),
+        "Q1 = Q1;    **  Some note;\nX = X; ** Other note;\n"
+    );
+}
+
+#[test]
+fn prose_with_operator_words_is_still_prose() {
+    // `to` is no operator in an expression; `or` is, but `unusual reaction`
+    // are two operands side by side.
+    let src = "a = a  **  Ability to adapt in routine or setting;\n\
+               b = b  **  Excessive or unusual reaction to noise;\n";
+    assert_eq!(findings(src).len(), 2, "{:?}", findings(src));
+}
+
+#[test]
+fn the_comment_starts_at_the_last_marker_before_the_prose() {
+    let src = "x = a * b ** Note on x;\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!(f[0].column, 11, "{:?}", f);
+    assert_eq!(autofix(src), "x = a * b; ** Note on x;\n");
+}
