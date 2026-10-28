@@ -17,6 +17,7 @@ pub mod line_endings;
 pub mod malformed_if_condition;
 pub mod malformed_label_statement;
 pub mod missing_assignment_semicolon;
+pub mod orphan_format_range;
 pub mod proc_statement_missing_semicolon;
 pub mod source_headers;
 pub mod star_comment_swallows_code;
@@ -66,6 +67,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         unreachable_else_if_branch::meta(),
         proc_statement_missing_semicolon::meta(),
         undefined_format::meta(),
+        orphan_format_range::meta(),
     ]
 }
 
