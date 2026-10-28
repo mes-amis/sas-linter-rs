@@ -260,6 +260,9 @@ rules:
   format_for_unknown_variable:
     enabled: true              # skipped automatically when the file uses set/merge/update/infile/input
 
+  undefined_format:
+    enabled: true              # skipped when the file has no proc format, or uses fmtsearch / %include
+
   invalid_numeric_literal:
     enabled: true              # reject INTEGER_LITERAL tokens the lexer accepts but SAS doesn't (`1f`, `1d2`, …)
 
@@ -388,6 +391,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `invalid_conventional_variable` | Identifier matches a configured naming convention regex but isn't in the catalog. Reports the closest Levenshtein matches as "did you mean?" hints. `allow_list` entries are matched literally; entries wrapped in `/.../` are matched as regexes. No-op until both `pattern` and `csv_paths` are configured. |
 | `inconsistent_variable_case` | Identifier appears with more than one casing in the same file (`myVar` vs `MyVar`). SAS treats both as the same variable; autofix rewrites every minority spelling to the most-common form. Skips proc-format definitions and `format.` / `lib.member` references. |
 | `format_for_unknown_variable` | `format` / `informat` / `attrib` / `label` statement assigns a format or label to a variable that's referenced nowhere else in the file — almost always a typo. Skipped on files that pull in columns via `set` / `merge` / `update` / `infile` / `input`. |
+| `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.
 

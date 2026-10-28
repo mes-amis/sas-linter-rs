@@ -23,6 +23,7 @@ pub mod star_comment_swallows_code;
 pub mod tab_expansion;
 pub mod trailing_whitespace;
 pub mod unbalanced_do_block;
+pub mod undefined_format;
 pub mod unreachable_else_if_branch;
 pub mod unreachable_inner_branch_value;
 pub mod unterminated_comment;
@@ -64,6 +65,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         unbalanced_do_block::meta(),
         unreachable_else_if_branch::meta(),
         proc_statement_missing_semicolon::meta(),
+        undefined_format::meta(),
     ]
 }
 
