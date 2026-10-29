@@ -8,12 +8,12 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.6.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.6.1**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
 **macOS (Apple Silicon)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-aarch64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.1/sas-lint-v0.6.1-aarch64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -21,7 +21,7 @@ sas-lint --version
 **macOS (Intel)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-x86_64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.1/sas-lint-v0.6.1-x86_64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -29,7 +29,7 @@ sas-lint --version
 **Linux (x86_64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-x86_64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.1/sas-lint-v0.6.1-x86_64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -37,7 +37,7 @@ sas-lint --version
 **Linux (arm64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-aarch64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.1/sas-lint-v0.6.1-aarch64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -47,7 +47,7 @@ sas-lint --version
 ```powershell
 $dir = "$env:LOCALAPPDATA\sas-lint"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.0/sas-lint-v0.6.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.1/sas-lint-v0.6.1-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
 & "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
@@ -72,19 +72,19 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
-The current extension release is **vscode-v0.4.1** (also kept in step by `tests/release_versions.rs`).
+The current extension release is **vscode-v0.4.2** (also kept in step by `tests/release_versions.rs`).
 
 **macOS / Linux**
 
 ```sh
-curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.1/sas-linter-vscode-0.4.1.vsix
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.2/sas-linter-vscode-0.4.2.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.1/sas-linter-vscode-0.4.1.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.2/sas-linter-vscode-0.4.2.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
 code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 
@@ -164,13 +164,32 @@ everything else to `0`.
 
 Conditions are modelled as comparisons against literals in either order
 (`x > 3`, `0 < x`), chained ranges (`5 le x le 70`), `in` lists, `sum()`
-thresholds, comparisons between two variables (`dob < ref_date`) and
-`missing(x)`; a lone `.` is the missing value. A condition on a derived
+thresholds, `max()` comparisons (`max(a, b) ge 2` holds when any argument
+does, as missing sorts below every number), comparisons between two variables (`dob < ref_date`) and
+`missing(x)`; a lone `.` is the missing value. A parenthesised comparison
+compared with 1 or 0 (`(x = 0) = 0`) is the comparison or its negation. A condition on a derived
 variable is rewritten into a condition on what decides it, when every
 assignment to the variable is a constant (`flag = 1;`, `flag = .;`), a copy
 (`xv = v;`) or a unit conversion (`m = (inches * 0.0254);`): `flag in (0,1)`
 becomes the conditions under which one of the assignments giving 0 or 1
-runs and no later assignment overrides it.
+runs and no later assignment overrides it. A sum or difference of
+variables and constants (`n = 7 - (a + b);`, or of comparisons,
+`n = (a = 0) + (b = 0);`) is rewritten over the values each variable's
+guard or catalog spec lists, or that a derived variable can be given
+(`x = iD1 - 1;` then `n = x + y;`), and is missing when any variable is;
+`n = sum(a, b, max(of c d));` skips missing arguments and is missing only
+when all are. A sum with few combinations of values becomes one
+alternative per combination the comparison accepts; a larger one becomes
+a count. `a - b ge 1` compares the difference of two variables, and
+`x > = 0` is read as `x >= 0`, as SAS does. `x not in (…)` and
+`x not eq k` are the negated comparisons. A counter (`n = 0;` then
+`if c then n = n + 1;` or the sum statement `if c then n + 1;`, or
+`n = n + x - 1` by a variable whose guard lists its values) is rewritten
+as a count of the steps whose conditions hold, so `n ge 2` becomes "at
+least two of those conditions". An `end;` left unmatched by a validity
+guard commented out above it doesn't end the program. A declared input
+(`x = x;`) that the source also assigns keeps its input value unless one
+of those assignments runs.
 
 Rows come from a weighted mix of strategies:
 
@@ -212,10 +231,18 @@ the bounds, and at least 0.1. `0-3` therefore yields -1, 0, 3 and 4, and
 into rows that already exist wherever they don't change those rows'
 branch outcomes and the cell wasn't deliberately put mid-range.
 
-Stdout reports `covers N/M branch outcomes`, plus the number of boundary
-values placed when the catalog documents any input. Stderr names each
-`file:line` outcome that no row reaches, either because the branch is
-unreachable or because it's beyond what the sampler can pin. `--minimal`
+`--minimal` also aims for every constant a derived variable can be
+assigned (`score = 0` … `score = 6`, `flag = 2`), each in some row, so
+every outcome of the algorithm is exercised, not just every branch.
+Branch coverage alone misses combinations: a scale's `0` needs every
+increment off at once.
+
+Stdout reports `covers N/M branch outcomes`, plus `N/M assigned values`
+when the source assigns any constants the graph can model and the number
+of boundary values placed when the catalog documents any input. Stderr
+names each `file:line` outcome and each `variable = value` that no row
+reaches, either because it's unreachable or because it's beyond what the
+sampler can pin. `--minimal`
 can't be combined with `--size`, `--weights`, `--perturbation-prob` or
 `--combo-size`.
 
