@@ -380,6 +380,9 @@ pub struct Graph {
     /// Constants assigned to derived variables; the targets [`minimal`]
     /// covers alongside branches.
     outcomes: Vec<Outcome>,
+    /// Constants assigned to variables whose final value isn't modelled,
+    /// each with the condition its assignment runs under.
+    assignments: Vec<Outcome>,
     arrays: HashMap<String, ArrayDecl>,
     value_sets: HashMap<String, Vec<Value>>,
     default_row: HashMap<String, Value>,
@@ -467,6 +470,9 @@ enum Target {
     Branch(usize, bool),
     /// [`Graph::outcomes`] `.0`: a derived variable given that constant.
     Value(usize),
+    /// [`Graph::assignments`] `.0`: a quiet row ([`quiet`]) that runs
+    /// that assignment, so arithmetic after it most likely adds nothing.
+    Assignment(usize),
     /// Input `.0` holding catalog boundary value `.1`.
     Boundary(String, Value),
 }
@@ -496,6 +502,7 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     let mut targets: Vec<Target> = (0..g.branches.len())
         .flat_map(|b| [Target::Branch(b, true), Target::Branch(b, false)])
         .chain((0..g.outcomes.len()).map(Target::Value))
+        .chain((0..g.assignments.len()).map(Target::Assignment))
         .collect();
     for var in &g.inputs {
         if let Some(spec) = specs.lookup(var) {
@@ -507,6 +514,7 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     let hit = |row: &Row, t: usize| match &targets[t] {
         Target::Branch(b, outcome) => reaches(&g.branches[*b], *outcome, row, &g),
         Target::Value(o) => eval(&g.outcomes[*o].need, row, &g, None) == Some(true),
+        Target::Assignment(a) => quiet(&g.assignments[*a].need, row, &g),
         Target::Boundary(var, v) => {
             row.get(var).and_then(|cell| sas_cmp(cell, v)) == Some(Ordering::Equal)
         }
@@ -516,10 +524,11 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
     // targets, else a fresh row; it then becomes that row's to keep.
     let place = |t: usize, cands: &mut Vec<Candidate>, rng: &mut Rng| {
         let (need, reversed) = match &targets[t] {
-            Target::Branch(..) | Target::Value(_) => {
+            Target::Branch(..) | Target::Value(_) | Target::Assignment(_) => {
                 let need = match &targets[t] {
                     Target::Branch(b, outcome) => requirement(&g.branches[*b], *outcome),
                     Target::Value(o) => positive(&g.outcomes[*o].need),
+                    Target::Assignment(a) => positive(&g.assignments[*a].need),
                     Target::Boundary(..) => unreachable!(),
                 };
                 // Odd attempts pin outer conditions first, for when they're
@@ -533,7 +542,13 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
             Target::Boundary(..) => (None, Pred::Tautology),
         };
         let attempts = if need.is_some() { MINIMAL_ATTEMPTS } else { 1 };
-        for ci in 0..=cands.len() {
+        // A quiet row gets a row of its own: merged, it would carry the
+        // other targets' pins.
+        let first = match &targets[t] {
+            Target::Assignment(_) => cands.len(),
+            _ => 0,
+        };
+        for ci in first..=cands.len() {
             for attempt in 0..attempts {
                 let base = cands.get(ci).map(|c| c.pins.clone()).unwrap_or_default();
                 let mut pins = base.clone();
@@ -554,6 +569,9 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
                             pick_disjuncts(if attempt % 2 == 0 { need } else { &reversed }, rng);
                         centred.extend(satisfy(&need, &mut pins, &g, rng));
                         repair(&need, &mut pins, &base, &g);
+                        if let Target::Assignment(a) = &targets[t] {
+                            quieten(&g.assignments[*a].need, &mut pins, &g);
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -645,6 +663,8 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
                     unproduced.push((o.var.clone(), o.value.to_string()));
                 }
             }
+            // Unmodelled, so a quiet row can't confirm the value.
+            Target::Assignment(_) => {}
             Target::Boundary(..) => boundaries += usize::from(placed(&t)),
         }
     }
@@ -665,6 +685,43 @@ pub fn minimal(source: &str, specs: &ValueSpecs, seed: u64) -> (Synthesized, Cov
             uncovered,
         },
     )
+}
+
+/// `need` holds for `row`, and no cell off its default value could go
+/// back to it with `need` still holding.
+fn quiet(need: &Pred, row: &Row, g: &Graph) -> bool {
+    if eval(need, row, g, None) != Some(true) {
+        return false;
+    }
+    let mut probe = row.clone();
+    for var in &g.inputs {
+        let (Some(cell), Some(default)) = (row.get(var), g.default_row.get(var)) else {
+            continue;
+        };
+        if cell == default {
+            continue;
+        }
+        probe.insert(var.clone(), default.clone());
+        let holds = eval(need, &probe, g, None) == Some(true);
+        probe.insert(var.clone(), cell.clone());
+        if holds {
+            return false;
+        }
+    }
+    true
+}
+
+/// Unpin each cell `need` still holds without, in input order, so the
+/// row [`quiet`] checks for.
+fn quieten(need: &Pred, pins: &mut Row, g: &Graph) {
+    for var in &g.inputs {
+        let Some(cell) = pins.remove(var) else {
+            continue;
+        };
+        if eval(need, &materialize(g, pins), g, None) != Some(true) {
+            pins.insert(var.clone(), cell);
+        }
+    }
 }
 
 /// `node` with each OR collapsed to one randomly chosen disjunct, so the
@@ -737,6 +794,8 @@ fn contradicts(p: &Pred, fixed: &[Atom]) -> bool {
                 .any(|v| on.iter().all(|x| holds(x.op, v, &x.values) != Some(false)))
         }
         Pred::And(c) => c.iter().any(|p| contradicts(p, fixed)),
+        // `not (guard)` over several inputs: closed when each is.
+        Pred::Or(c) => c.iter().all(|p| contradicts(p, fixed)),
         _ => false,
     }
 }
@@ -883,10 +942,12 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
 
     // Rewrite conditions on derived constants into conditions on what
     // decides them, so guards like `flag in (0,1)` become reachable.
-    let assigned_constants: Vec<(String, Value)> = defs
+    let assigned_constants: Vec<(String, Value, Vec<Pred>)> = defs
         .iter()
         .filter_map(|d| match &d.value {
-            DefValue::Const(v) if *v != Value::Missing => Some((d.var.clone(), v.clone())),
+            DefValue::Const(v) if *v != Value::Missing => {
+                Some((d.var.clone(), v.clone(), d.cond.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -924,11 +985,14 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
     branches.retain(|b| references_input(&b.leaf, &input_set, &arrays));
 
     // Each constant a derived variable can be given, in source order,
-    // where its condition comes down to inputs.
+    // where its condition comes down to inputs. A variable whose later
+    // arithmetic isn't modelled (`s = s + round(s / 2)`) gets the
+    // condition its assignment runs under instead, in `assignments`.
     let mut outcomes: Vec<Outcome> = Vec::new();
-    for (var, value) in assigned_constants {
-        if !derived.contains_key(&var) || outcomes.iter().any(|o| o.var == var && o.value == value)
-        {
+    let mut assignments: Vec<Outcome> = Vec::new();
+    for (var, value, cond) in assigned_constants {
+        let seen = |list: &[Outcome]| list.iter().any(|o| o.var == var && o.value == value);
+        if seen(&outcomes) || seen(&assignments) {
             continue;
         }
         let atom = Pred::Atom(Atom {
@@ -937,15 +1001,26 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
             values: vec![value.clone()],
             is_array: false,
         });
-        let need = substitute_within(
-            &atom,
-            &derived,
-            DERIVED_DEPTH,
-            &mut HashMap::new(),
-            OUTCOME_BUDGET,
-        );
-        if need != atom && references_input(&need, &input_set, &arrays) {
-            outcomes.push(Outcome { var, value, need });
+        let need = if derived.contains_key(&var) {
+            substitute_within(
+                &atom,
+                &derived,
+                DERIVED_DEPTH,
+                &mut HashMap::new(),
+                OUTCOME_BUDGET,
+            )
+        } else {
+            atom.clone()
+        };
+        if need != atom {
+            if references_input(&need, &input_set, &arrays) {
+                outcomes.push(Outcome { var, value, need });
+            }
+            continue;
+        }
+        let need = substitute_derived(&Pred::And(cond), &derived, DERIVED_DEPTH);
+        if references_input(&need, &input_set, &arrays) {
+            assignments.push(Outcome { var, value, need });
         }
     }
 
@@ -969,6 +1044,7 @@ pub fn build_graph(source: &str, specs: &ValueSpecs) -> Graph {
         predicates,
         branches,
         outcomes,
+        assignments,
         arrays,
         value_sets,
         default_row,
@@ -1813,6 +1889,12 @@ fn substitute_within(
                             cache,
                         ))
                     }
+                    DefValue::Truncated(src) => {
+                        let Some(atom) = untruncated(a, src) else {
+                            continue;
+                        };
+                        Some(recur(&Pred::Atom(atom), cache))
+                    }
                 };
                 if let Some(mut later) = none_after(i + 1, Some(i)) {
                     let mut all: Vec<Pred> = d.cond.iter().map(|p| recur(p, cache)).collect();
@@ -1856,6 +1938,33 @@ fn substitute_within(
         ))),
         other => other.clone(),
     }
+}
+
+/// Range atom `a` on `int(src)` as the same range on `src`, for whole
+/// bounds: `int(y) gt 7` is `y ge 8`, `int(y) le 11` is `y lt 12`. `int`
+/// truncates toward zero, so the bound shifts on the side away from it.
+/// Lists and fractional bounds stay unmodelled.
+fn untruncated(a: &Atom, src: &str) -> Option<Atom> {
+    let [v] = &a.values[..] else {
+        return None;
+    };
+    let n = v.as_f64().filter(|n| n.fract() == 0.0)?;
+    let (op, bound) = match a.op {
+        Op::Gt if n >= 0.0 => (Op::Ge, n + 1.0),
+        Op::Ge if n > 0.0 => (Op::Ge, n),
+        Op::Ge | Op::Gt => (Op::Gt, if a.op == Op::Ge { n - 1.0 } else { n }),
+        Op::Lt if n <= 0.0 => (Op::Le, n - 1.0),
+        Op::Lt => (Op::Lt, n),
+        Op::Le if n >= 0.0 => (Op::Lt, n + 1.0),
+        Op::Le => (Op::Le, n),
+        Op::In | Op::Eq | Op::Ne => return None,
+    };
+    Some(Atom {
+        var: src.to_string(),
+        op,
+        values: vec![Value::number(bound)],
+        is_array: false,
+    })
 }
 
 /// Definitions `i` and `j` can't both fire: one is reached only through
@@ -2375,6 +2484,8 @@ enum DefValue {
     Copy(String),
     /// `X = Y * k` (also `k * Y`, `Y / k`): a unit conversion.
     Scaled(String, f64),
+    /// `X = int(Y)`: `Y` with its fraction dropped.
+    Truncated(String),
     /// `X = X + k` (also `k + X`, `X - k`): a counter step.
     Add(f64),
     /// `X = X + Y` (also `Y + X`, `X + Y - k`): a counter step by a
@@ -2705,6 +2816,12 @@ impl Walker<'_> {
                     step.or_else(|| {
                         scaled_copy(rhs)
                             .map(|(src, k)| DefValue::Scaled(resolve_alias(self.aliases, src), k))
+                    })
+                    .or_else(|| match call_args(rhs, "int").as_deref() {
+                        Some([[y]]) if y.token_type == TokenType::Identifier => Some(
+                            DefValue::Truncated(resolve_alias(self.aliases, y.text.clone())),
+                        ),
+                        _ => None,
                     })
                     .or_else(|| {
                         sum_call(rhs).map(|args| {
@@ -5017,6 +5134,31 @@ mod tests {
     }
 
     #[test]
+    fn picks_pass_over_a_failed_guard_the_row_must_pass() {
+        // `not (a in (0,1) and b in (0,1) and x)` under that guard: only
+        // `not x` is open.
+        let valid = |var: &str| Atom {
+            var: var.to_string(),
+            op: Op::In,
+            values: vec![Value::Int(0), Value::Int(1)],
+            is_array: false,
+        };
+        let x = Pred::Atom(Atom {
+            var: "x".to_string(),
+            op: Op::Eq,
+            values: vec![Value::Int(1)],
+            is_array: false,
+        });
+        let guard = Pred::And(vec![Pred::Atom(valid("a")), Pred::Atom(valid("b"))]);
+        let need = negate(&Pred::And(vec![guard, x.clone()]));
+        let fixed = [valid("a"), valid("b")];
+        for seed in 0..32 {
+            let picked = pick_within(&need, &fixed, &mut Rng::new(seed));
+            assert_eq!(picked, negate(&x), "seed {seed}");
+        }
+    }
+
+    #[test]
     fn counts_keep_one_arm_of_each_inputs_else_if_chain() {
         // A total of 0 needs every input's `+0` arm: skipping one leaves
         // its input no value the guard allows.
@@ -5235,6 +5377,67 @@ mod tests {
             .map(|r| r.iter().map(Value::to_string).collect())
             .collect();
         (rows, cov)
+    }
+
+    #[test]
+    fn untruncated_bounds_shift_away_from_zero() {
+        let on = |op, n: i64| Atom {
+            var: "x".to_string(),
+            op,
+            values: vec![Value::Int(n)],
+            is_array: false,
+        };
+        let bound = |a: &Atom| untruncated(a, "y").map(|b| (b.op, b.values[0].to_string()));
+        let want = |op, n: &str| Some((op, n.to_string()));
+        assert_eq!(bound(&on(Op::Gt, 7)), want(Op::Ge, "8"));
+        assert_eq!(bound(&on(Op::Ge, 8)), want(Op::Ge, "8"));
+        assert_eq!(bound(&on(Op::Ge, 0)), want(Op::Gt, "-1"));
+        assert_eq!(bound(&on(Op::Lt, 8)), want(Op::Lt, "8"));
+        assert_eq!(bound(&on(Op::Lt, 0)), want(Op::Le, "-1"));
+        assert_eq!(bound(&on(Op::Le, 11)), want(Op::Lt, "12"));
+        assert_eq!(bound(&on(Op::Eq, 3)), None);
+    }
+
+    #[test]
+    fn minimal_reaches_ranges_of_truncated_values() {
+        // Column is a. `int(7.5)` is 7, so `g = 2` needs a of 8 or more.
+        let (rows, cov) = minimal_rows(
+            "x = int(a);\n\
+             if 0 <= x <= 7 then g = 1;\n\
+             else if 8 <= x <= 11 then g = 2;\n",
+        );
+        assert!(cov.uncovered.is_empty(), "{:?}", cov.uncovered);
+        let ages: Vec<f64> = rows.iter().filter_map(|r| r[0].parse().ok()).collect();
+        assert!(ages.iter().any(|&a| (8.0..12.0).contains(&a)), "{rows:?}");
+        assert!(ages.iter().all(|a| a.fract() == 0.0), "{rows:?}");
+    }
+
+    #[test]
+    fn minimal_runs_unmodelled_assignments_from_a_quiet_row() {
+        // Columns are a, b, c. `round` leaves `s` unmodelled; `s = 0`
+        // stays 0 only when the answers that aren't 8 add nothing.
+        let (rows, _) = minimal_rows(
+            "if a in (0,1,2,3,8) and b in (0,1,2,3,8) and c in (0,1,2,3,8) then do;\n\
+               n = 0;\n\
+               if a = 8 then n = n + 1;\n\
+               if b = 8 then n = n + 1;\n\
+               if c = 8 then n = n + 1;\n\
+               if n = 1 then do;\n\
+                 s = 0;\n\
+                 if a in (0,1,2,3) then s = s + a;\n\
+                 if b in (0,1,2,3) then s = s + b;\n\
+                 if c in (0,1,2,3) then s = s + c;\n\
+                 m = round(s / 2);\n\
+                 s = s + m;\n\
+               end;\n\
+             end;\n",
+        );
+        let quiet = |r: &Vec<String>| {
+            let mut r = r.clone();
+            r.sort();
+            r == ["0", "0", "8"]
+        };
+        assert!(rows.iter().any(quiet), "{rows:?}");
     }
 
     #[test]
