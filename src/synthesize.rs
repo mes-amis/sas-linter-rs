@@ -68,7 +68,7 @@ const COMBO_SIZES: RangeInclusive<usize> = 2..=6;
 const DECIMAL_SLICES: usize = 5;
 /// Random re-tries per placement when [`minimal`] packs a branch outcome
 /// into a row (OR disjuncts, array members, and value picks are random).
-const MINIMAL_ATTEMPTS: usize = 16;
+const MINIMAL_ATTEMPTS: usize = 64;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Strategy {
@@ -1403,7 +1403,7 @@ const LINEAR_COMBINATIONS: usize = 128;
 /// Largest rewrite of a comparison between variables with a derived side
 /// ([`cmp_alternatives`]): one alternative per value of that side, each
 /// carrying the conditions for that value.
-const CMP_BUDGET: usize = 10 * DERIVED_BUDGET;
+const CMP_BUDGET: usize = 50 * DERIVED_BUDGET;
 
 /// `c` as one alternative per value its derived side (the right one when
 /// `right`) can be given, with the other side compared with a number:
@@ -1477,7 +1477,7 @@ fn substitute_derived(node: &Pred, derived: &HashMap<String, Vec<Def>>, depth: u
 /// target is rewritten once, on its own, so it can be larger than the
 /// conditions [`DERIVED_BUDGET`] bounds, which the sampler meets again and
 /// again inside other conditions.
-const OUTCOME_BUDGET: usize = 8 * DERIVED_BUDGET;
+const OUTCOME_BUDGET: usize = CMP_BUDGET;
 
 fn substitute_cached(
     node: &Pred,
@@ -1488,7 +1488,20 @@ fn substitute_cached(
     substitute_within(node, derived, depth, cache, DERIVED_BUDGET)
 }
 
-/// [`substitute_cached`] with `budget` for the atom `node` itself.
+/// Budget for the atoms inside a rewrite made with `budget`: a value
+/// target's own rewrite may be large, but the atoms it leads to keep the
+/// condition budget, or casemix groupers unfold for many minutes.
+fn nested(budget: usize) -> usize {
+    budget.min(DERIVED_BUDGET)
+}
+
+/// Budget for the atoms a comparison between variables is rewritten into
+/// (`xBasal le 18`): one per value of its derived side, each larger than
+/// a plain condition.
+const CMP_ATOM_BUDGET: usize = 3 * DERIVED_BUDGET;
+
+/// [`substitute_cached`] with `budget` for the atom `node` itself; the
+/// atoms its rewrite leads to get [`nested`]`(budget)`.
 fn substitute_within(
     node: &Pred,
     derived: &HashMap<String, Vec<Def>>,
@@ -1510,11 +1523,21 @@ fn substitute_within(
                 .filter(|&right| derived.contains_key(if right { &c.right } else { &c.left }))
                 .filter_map(|right| {
                     let alts = cmp_alternatives(c, right, derived)?;
-                    Some(substitute_cached(&Pred::Or(alts), derived, depth, cache))
+                    let atoms = |p: &Pred, cache: &mut HashMap<String, Pred>| match p {
+                        Pred::And(c) => Pred::And(
+                            c.iter()
+                                .map(|p| {
+                                    substitute_within(p, derived, depth, cache, CMP_ATOM_BUDGET)
+                                })
+                                .collect(),
+                        ),
+                        p => substitute_within(p, derived, depth, cache, CMP_ATOM_BUDGET),
+                    };
+                    Some(Pred::Or(alts.iter().map(|p| atoms(p, cache)).collect()))
                 })
                 .min_by_key(pred_size);
             match out {
-                Some(out) if pred_size(&out) <= CMP_BUDGET => out,
+                Some(out) if pred_size(&out) <= CMP_BUDGET.max(budget) => out,
                 _ => node.clone(),
             }
         }
@@ -1528,14 +1551,14 @@ fn substitute_within(
                 .iter()
                 .any(|d| matches!(d.value, DefValue::Add(_) | DefValue::AddVar(..)))
             {
-                let out = substitute_counter(a, defs, derived, depth, cache)
+                let out = substitute_counter(a, defs, derived, depth, cache, budget)
                     .filter(|p| pred_size(p) <= budget)
                     .unwrap_or_else(|| node.clone());
                 cache.insert(key, out.clone());
                 return out;
             }
             let recur = |p: &Pred, cache: &mut HashMap<String, Pred>| {
-                substitute_cached(p, derived, depth - 1, cache)
+                substitute_within(p, derived, depth - 1, cache, nested(budget))
             };
             let mut not_fired: Vec<Option<Pred>> = Vec::with_capacity(defs.len());
             for d in defs {
@@ -1820,15 +1843,17 @@ fn substitute_within(
         }
         Pred::And(c) => Pred::And(
             c.iter()
-                .map(|p| substitute_cached(p, derived, depth, cache))
+                .map(|p| substitute_within(p, derived, depth, cache, nested(budget)))
                 .collect(),
         ),
         Pred::Or(c) => Pred::Or(
             c.iter()
-                .map(|p| substitute_cached(p, derived, depth, cache))
+                .map(|p| substitute_within(p, derived, depth, cache, nested(budget)))
                 .collect(),
         ),
-        Pred::Not(p) => Pred::Not(Box::new(substitute_cached(p, derived, depth, cache))),
+        Pred::Not(p) => Pred::Not(Box::new(substitute_within(
+            p, derived, depth, cache, budget,
+        ))),
         other => other.clone(),
     }
 }
@@ -1876,11 +1901,12 @@ fn substitute_counter(
     derived: &HashMap<String, Vec<Def>>,
     depth: usize,
     cache: &mut HashMap<String, Pred>,
+    budget: usize,
 ) -> Option<Pred> {
     let mut recur = |conds: &[Pred]| -> Vec<Pred> {
         conds
             .iter()
-            .map(|p| substitute_cached(p, derived, depth - 1, cache))
+            .map(|p| substitute_within(p, derived, depth - 1, cache, nested(budget)))
             .collect()
     };
     let resets: Vec<usize> = (0..defs.len())
