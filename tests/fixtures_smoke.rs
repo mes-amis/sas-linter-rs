@@ -62,6 +62,10 @@ const PAIRS: &[(&str, &str)] = &[
     ("statement_not_valid", "statement_not_valid"),
     ("unescaped_quote_in_string", "unescaped_quote_in_string"),
     ("undefined_format", "undefined_format"),
+    (
+        "in_range_on_fractional_value",
+        "in_range_on_fractional_value",
+    ),
     ("unreachable_else_if_branch", "unreachable_else_if_branch"),
     (
         "unreachable_else_if_branch",

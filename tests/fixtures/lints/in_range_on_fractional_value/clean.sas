@@ -1,0 +1,10 @@
+data scored;
+   set measures;
+   bmi = weight / (height * height);
+   age = floor(days / 365.25);
+   total = sum(a, b, c);
+   if age in (0:130) and 5 le bmi le 70 and total in (0:9) then do;
+      if bmi < 18 then score = 7;
+      else score = 3;
+   end;
+run;

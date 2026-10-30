@@ -325,6 +325,10 @@ rules:
   undefined_format:
     enabled: true              # skipped when the file has no proc format, or uses fmtsearch / %include
 
+  in_range_on_fractional_value:
+    enabled: true
+    autofix: false             # rewrite `VAR in (N:M)` to `N le VAR le M`
+
   invalid_numeric_literal:
     enabled: true              # reject INTEGER_LITERAL tokens the lexer accepts but SAS doesn't (`1f`, `1d2`, …)
 
@@ -456,6 +460,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `orphan_format_range` | Inside `proc format`, a statement that starts with a literal, range, `low` / `high` or `other` followed by `=`, right after a `value` / `invalue` / `picture` statement — a stray `;` closed the definition early and SAS fails with `ERROR 180-322`. Autofix removes that `;`. |
 | `statement_not_valid` | A statement in open code or a data step that doesn't start like any SAS statement — bare text (a filename line above the header), stray punctuation (`*/.`), a `*` comment cut short by an embedded `;`. Accepts keywords, assignments (`x =`, `a{i} =`, `'n'n =`), sum statements, labels, hash method calls and macro code. PROC bodies are skipped; `run;` ends a PROC except run-group PROCs (`datasets`, `reg`, `sql`, …), which end at `quit;`. SAS fails with `ERROR 180-322`. Report-only. |
 | `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
+| `in_range_on_fractional_value` | `VAR in (… N:M …)` where `VAR` can hold a fraction. A colon range in an `in` list stands for the whole numbers `N, N+1, …, M`, so `bmi in (5:70)` is false for `28.4` — SAS compiles it without a note. `VAR` counts as fractional when the file assigns it a division, a non-integer literal, a negative or fractional power, or a function such as `sqrt` / `mean` / `exp` (not inside `floor`, `int`, `round(x)` and other whole-number functions), or else compares it with a non-integer literal (`bmi < 18.5`). Variables it can't reason about are left alone. One finding per range. Autofix rewrites a list that is a single range to `N le VAR le M`; mixed lists and `not in` are report-only. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.
 
