@@ -8,12 +8,12 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.7.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.7.1**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
 **macOS (Apple Silicon)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-aarch64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.1/sas-lint-v0.7.1-aarch64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -21,7 +21,7 @@ sas-lint --version
 **macOS (Intel)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-x86_64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.1/sas-lint-v0.7.1-x86_64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -29,7 +29,7 @@ sas-lint --version
 **Linux (x86_64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-x86_64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.1/sas-lint-v0.7.1-x86_64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -37,7 +37,7 @@ sas-lint --version
 **Linux (arm64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-aarch64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.1/sas-lint-v0.7.1-aarch64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -47,7 +47,7 @@ sas-lint --version
 ```powershell
 $dir = "$env:LOCALAPPDATA\sas-lint"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.1/sas-lint-v0.7.1-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
 & "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
