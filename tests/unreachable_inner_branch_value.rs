@@ -404,3 +404,36 @@ fn rule_is_report_only() {
     let m = meta.iter().find(|m| m.id == RULE).expect("rule registered");
     assert!(!m.supports_autofix);
 }
+
+// ── Colon ranges ─────────────────────────────────────────────────────────
+
+#[test]
+fn a_colon_range_guard_restricts_to_its_members() {
+    let src = "if e in (1:4) then do;\n\
+               if e = 7 then x = 1;\n\
+               if e in (2, 3) then x = 2;\n\
+               end;\n";
+    assert_eq!(positions(src), vec![(2, 8)]);
+}
+
+#[test]
+fn dead_members_of_a_colon_range_are_one_finding() {
+    let src = "if e in (1:4) then do;\n\
+               if e in (1:10) then x = 1;\n\
+               end;\n";
+    let f = findings(src);
+    assert_eq!(positions(src), vec![(2, 10)]);
+    assert_eq!(
+        f[0].message,
+        "values 5:10 for e are excluded by the enclosing `if e in (1:4)` guard at \
+         line 1; this branch can never fire for those values."
+    );
+}
+
+#[test]
+fn reversed_or_huge_colon_ranges_are_opaque() {
+    for guard in ["e in (4:1)", "e in (0:100000)"] {
+        let src = format!("if {} then do;\nif e = 7 then x = 1;\nend;\n", guard);
+        assert!(findings(&src).is_empty(), "{}", guard);
+    }
+}

@@ -206,7 +206,8 @@ pub struct Value<'a> {
     pub display: String,
 }
 
-/// `VAR op literal` or `VAR in (literal, …)`.
+/// `VAR op literal` or `VAR in (literal, …)`. A colon range in the list
+/// is expanded to its members, each pointing at the range's first token.
 #[derive(Debug, Clone)]
 pub struct Comparison<'a> {
     pub var: &'a Token,
@@ -228,6 +229,48 @@ impl Comparison<'_> {
         let end = self.tokens.last().map_or(start, |t| t.end_byte as usize);
         source.get(start..end).unwrap_or_default().to_string()
     }
+}
+
+/// The most members a colon range may expand to. A wider range makes the
+/// comparison unreadable rather than a set too large to hold.
+const MAX_RANGE_MEMBERS: i64 = 1000;
+
+/// Values grouped by the literal they were written as, in order: a colon
+/// range's members share its first token. Each group is shown as the value
+/// (`4`), a run of three or more (`5:10`) or a list (`2, 4`), with its size.
+pub fn group_by_literal<'a>(values: &[&Value<'a>]) -> Vec<(&'a Token, String, usize)> {
+    let mut groups: Vec<(&'a Token, Vec<&Value<'a>>)> = Vec::new();
+    for v in values {
+        match groups.last_mut() {
+            Some((tok, members)) if tok.start_byte == v.tok.start_byte => members.push(v),
+            _ => groups.push((v.tok, vec![v])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(tok, members)| {
+            let ints: Vec<i64> = members
+                .iter()
+                .filter_map(|v| match v.lit {
+                    Lit::Int(n) => Some(n),
+                    _ => None,
+                })
+                .collect();
+            let run = ints.len() == members.len()
+                && ints.len() >= 3
+                && ints.windows(2).all(|w| w[1] == w[0] + 1);
+            let display = if run {
+                format!("{}:{}", ints[0], ints[ints.len() - 1])
+            } else {
+                members
+                    .iter()
+                    .map(|v| v.display.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            (tok, display, members.len())
+        })
+        .collect()
 }
 
 /// Read `part` as a single comparison of a variable against literals. The
@@ -267,7 +310,7 @@ pub fn comparison(part: &[Token]) -> Option<Comparison<'_>> {
         TokenType::KwGT | TokenType::GT => single(CmpOp::Gt),
         TokenType::KwGE | TokenType::GE => single(CmpOp::Ge),
         TokenType::KwIN => {
-            // `in (lit, lit, …)`, commas optional as SAS allows.
+            // `in (lit, lit, lo:hi, …)`, commas optional as SAS allows.
             if part.get(2)?.token_type != TokenType::LPAREN
                 || part.last()?.token_type != TokenType::RPAREN
             {
@@ -282,8 +325,25 @@ pub fn comparison(part: &[Token]) -> Option<Comparison<'_>> {
                     continue;
                 }
                 let (v, used) = value(k)?;
-                values.push(v);
                 k += used;
+                // `lo:hi` stands for the whole numbers from `lo` to `hi`.
+                if part.get(k).map(|t| t.token_type) == Some(TokenType::COLON) {
+                    let (hi, hi_used) = literal_at(part, k + 1)?;
+                    let (Lit::Int(lo), Lit::Int(hi)) = (&v.lit, hi) else {
+                        return None;
+                    };
+                    if hi < *lo || hi - lo >= MAX_RANGE_MEMBERS {
+                        return None;
+                    }
+                    values.extend((*lo..=hi).map(|n| Value {
+                        lit: Lit::Int(n),
+                        tok: v.tok,
+                        display: n.to_string(),
+                    }));
+                    k += 1 + hi_used;
+                    continue;
+                }
+                values.push(v);
             }
             (!values.is_empty()).then_some(Comparison {
                 var,

@@ -370,3 +370,13 @@ fn rule_is_report_only() {
     let m = meta.iter().find(|m| m.id == RULE).expect("rule registered");
     assert!(!m.supports_autofix, "rule must stay report-only");
 }
+
+#[test]
+fn a_colon_range_covers_its_members() {
+    let src = "if e in (1:5) then x = 1;\nelse if e in (2, 3) then x = 2;\n";
+    assert_eq!(positions(src), vec![(2, 6)]);
+    let src = "if e in (1:5) then x = 1;\nelse if e in (1,2,3,4,5) then x = 2;\n";
+    assert_eq!(findings(src).len(), 1);
+    let src = "if e in (1:5) then x = 1;\nelse if e = 6 then x = 2;\n";
+    assert!(findings(src).is_empty());
+}

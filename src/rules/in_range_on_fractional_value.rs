@@ -4,18 +4,26 @@
 //! compiles the test without a note.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use sas_lexer::TokenType;
 
+use crate::config::opt_bool;
 use crate::finding::{Finding, Severity};
 use crate::rule::{CheckContext, Rule};
 use crate::token::{Token, TokenStream};
+use crate::value_specs::{SpecKind, SpecSource, ValueSpecs};
 
 use super::condition::{self, Lit, CONJUNCTION_OPS, DISJUNCTION_OPS};
 use super::RuleMeta;
 
 pub struct InRangeOnFractionalValue {
     autofix: bool,
+    /// Count `18 le VAR lt 30` as a sign `VAR` is continuous. Off by
+    /// default: the form is common for whole-number values too.
+    half_open_ranges: bool,
+    source: SpecSource,
+    specs: OnceLock<ValueSpecs>,
 }
 
 const ID: &str = "in_range_on_fractional_value";
@@ -27,10 +35,20 @@ pub fn meta() -> RuleMeta {
         id: ID,
         description: DESCRIPTION,
         supports_autofix: true,
-        default_factory: || Box::new(InRangeOnFractionalValue { autofix: false }),
+        default_factory: || {
+            Box::new(InRangeOnFractionalValue {
+                autofix: false,
+                half_open_ranges: false,
+                source: SpecSource::default(),
+                specs: OnceLock::new(),
+            })
+        },
         config_factory: |opts| {
             Ok(Box::new(InRangeOnFractionalValue {
-                autofix: crate::config::opt_bool(opts, "autofix").unwrap_or(false),
+                autofix: opt_bool(opts, "autofix").unwrap_or(false),
+                half_open_ranges: opt_bool(opts, "half_open_ranges").unwrap_or(false),
+                source: SpecSource::from_opts(opts)?,
+                specs: OnceLock::new(),
             }))
         },
     }
@@ -53,7 +71,7 @@ impl Rule for InRangeOnFractionalValue {
     fn check(&self, ctx: &CheckContext) -> Vec<Finding> {
         let tokens = &ctx.tokens.default;
         let lists = in_lists(tokens);
-        let evidence = fractional_evidence(tokens, &lists);
+        let evidence = self.evidence(tokens, ctx.source, &lists);
         let mut findings = Vec::new();
         for list in &lists {
             let Some(ev) = evidence.get(&list.var.text.to_lowercase()) else {
@@ -67,9 +85,9 @@ impl Rule for InRangeOnFractionalValue {
                     column: r.first.start_column + 1,
                     rule: ID,
                     message: format!(
-                        "`{}` only matches whole numbers; {} is {} at line {}. \
+                        "`{}` only matches whole numbers; {} is {}. \
                          Use `{} le {} le {}` to include fractions.",
-                        written, list.var.text, ev.why, ev.line, r.lo, list.var.text, r.hi
+                        written, list.var.text, ev, r.lo, list.var.text, r.hi
                     ),
                     severity: Severity::Warning,
                 });
@@ -85,7 +103,7 @@ impl Rule for InRangeOnFractionalValue {
         let stream = TokenStream::tokenize(source);
         let tokens = &stream.default;
         let lists = in_lists(tokens);
-        let evidence = fractional_evidence(tokens, &lists);
+        let evidence = self.evidence(tokens, source, &lists);
         let mut edits: Vec<(usize, usize, String)> = lists
             .iter()
             .filter(|l| !l.negated && l.items == 1 && l.ranges.len() == 1)
@@ -112,6 +130,29 @@ impl Rule for InRangeOnFractionalValue {
     }
 }
 
+impl InRangeOnFractionalValue {
+    /// Why each variable, lowercased, can hold a non-integer, from the
+    /// file itself and then from the values catalog.
+    fn evidence(
+        &self,
+        tokens: &[Token],
+        source: &str,
+        lists: &[InList],
+    ) -> HashMap<String, String> {
+        let mut out = fractional_evidence(tokens, source, lists, self.half_open_ranges);
+        let specs = self.specs.get_or_init(|| self.source.load());
+        for list in lists {
+            if let Some(SpecKind::Decimal(lo, hi)) = specs.lookup(&list.var.text).map(|s| &s.kind) {
+                out.entry(list.var.text.to_lowercase()).or_insert(format!(
+                    "documented with decimal values {} to {} in the values catalog",
+                    lo, hi
+                ));
+            }
+        }
+        out
+    }
+}
+
 /// `VAR [not] in ( … )` with at least one colon range.
 struct InList<'a> {
     var: &'a Token,
@@ -122,8 +163,9 @@ struct InList<'a> {
     /// Items in the list, ranges included.
     items: usize,
     ranges: Vec<ColonRange<'a>>,
-    /// Non-integer literals in the list (`in (1.5, 2)`).
-    fractions: Vec<&'a Token>,
+    /// Non-integer literals in the list (`in (1.5, 2)`), first and last
+    /// token (a negative literal is two).
+    fractions: Vec<(&'a Token, &'a Token)>,
 }
 
 impl InList<'_> {
@@ -196,7 +238,7 @@ fn in_lists(tokens: &[Token]) -> Vec<InList<'_>> {
                 }
                 _ => {
                     if matches!(lit, Lit::Float(_)) {
-                        fractions.push(&body[j + used - 1]);
+                        fractions.push((&body[j], &body[j + used - 1]));
                     }
                     j += used;
                 }
@@ -219,17 +261,17 @@ fn in_lists(tokens: &[Token]) -> Vec<InList<'_>> {
     out
 }
 
-/// Why a variable is thought to hold fractions, and where.
-struct Evidence {
-    line: u32,
-    why: String,
-}
-
-/// Variables, lowercased, that can hold a non-integer: assigned an
-/// expression that yields fractions, or else compared with a non-integer
-/// literal. The first assignment wins; a comparison is the fallback.
-fn fractional_evidence(tokens: &[Token], lists: &[InList]) -> HashMap<String, Evidence> {
-    let mut out: HashMap<String, Evidence> = HashMap::new();
+/// Variables, lowercased, that can hold a non-integer, each with why and
+/// where: assigned an expression that yields fractions, or else compared
+/// with a non-integer literal (or, with `half_open`, as a half-open range).
+/// The first assignment wins; a comparison is the fallback.
+fn fractional_evidence(
+    tokens: &[Token],
+    source: &str,
+    lists: &[InList],
+    half_open: bool,
+) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
     for i in 0..tokens.len() {
         if tokens[i].token_type != TokenType::Identifier
             || tokens.get(i + 1).map(|t| t.token_type) != Some(TokenType::ASSIGN)
@@ -243,17 +285,18 @@ fn fractional_evidence(tokens: &[Token], lists: &[InList]) -> HashMap<String, Ev
             .map_or(tokens.len(), |p| i + 2 + p);
         if let Some(why) = fraction_source(&tokens[i + 2..end]) {
             out.entry(tokens[i].text.to_lowercase())
-                .or_insert(Evidence {
-                    line: tokens[i].start_line,
-                    why,
-                });
+                .or_insert(format!("{} at line {}", why, tokens[i].start_line));
         }
     }
-    let mut compared = |var: &Token, lit: &Token| {
-        out.entry(var.text.to_lowercase()).or_insert(Evidence {
-            line: lit.start_line,
-            why: format!("compared with {}", lit.text),
-        });
+    let text = |from: &Token, to: &Token| {
+        source
+            .get(from.start_byte as usize..to.end_byte as usize)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut compared = |var: &Token, why: String, line: u32| {
+        out.entry(var.text.to_lowercase())
+            .or_insert(format!("{} at line {}", why, line));
     };
     for i in 0..tokens.len() {
         // `VAR op 18.5`
@@ -271,7 +314,12 @@ fn fractional_evidence(tokens: &[Token], lists: &[InList]) -> HashMap<String, Ev
                     .get(i + 2 + used)
                     .is_some_and(|t| is_arithmetic(t.token_type))
                 {
-                    compared(&tokens[i], &tokens[i + 1 + used]);
+                    let lit = text(&tokens[i + 2], &tokens[i + 1 + used]);
+                    compared(
+                        &tokens[i],
+                        format!("compared with {}", lit),
+                        tokens[i].start_line,
+                    );
                 }
             }
         }
@@ -288,16 +336,73 @@ fn fractional_evidence(tokens: &[Token], lists: &[InList]) -> HashMap<String, Ev
                     .get(i + used + 2)
                     .is_some_and(|t| is_arithmetic(t.token_type))
             {
-                compared(&tokens[i + used + 1], &tokens[i + used - 1]);
+                let lit = text(&tokens[i], &tokens[i + used - 1]);
+                compared(
+                    &tokens[i + used + 1],
+                    format!("compared with {}", lit),
+                    tokens[i].start_line,
+                );
+            }
+        }
+        // `18 le VAR lt 30`
+        if half_open {
+            if let Some((var, last)) = half_open_range(tokens, i) {
+                let written = text(&tokens[i], &tokens[last]);
+                compared(
+                    &tokens[var],
+                    format!("compared as a half-open range (`{}`)", written),
+                    tokens[i].start_line,
+                );
             }
         }
     }
     for list in lists {
-        if let Some(lit) = list.fractions.first() {
-            compared(list.var, lit);
+        if let Some((first, last)) = list.fractions.first() {
+            compared(
+                list.var,
+                format!("compared with {}", text(first, last)),
+                first.start_line,
+            );
         }
     }
     out
+}
+
+/// `lo op VAR op hi` starting at `i` with one inclusive and one exclusive
+/// bound, both the same direction (`18 le x lt 30`, `30 gt x ge 18`).
+/// Returns the indexes of `VAR` and of the last token.
+fn half_open_range(tokens: &[Token], i: usize) -> Option<(usize, usize)> {
+    if i.checked_sub(1)
+        .is_some_and(|p| is_arithmetic(tokens[p].token_type) || is_operand(tokens[p].token_type))
+    {
+        return None;
+    }
+    let (lo, used) = condition::literal_at(tokens, i)?;
+    lo.as_f64()?;
+    let op1 = bound_op(tokens.get(i + used)?.token_type)?;
+    tokens
+        .get(i + used + 1)
+        .filter(|t| t.token_type == TokenType::Identifier)?;
+    let op2 = bound_op(tokens.get(i + used + 2)?.token_type)?;
+    let (hi, hi_used) = condition::literal_at(tokens, i + used + 3)?;
+    hi.as_f64()?;
+    let last = i + used + 2 + hi_used;
+    let tight_after = tokens
+        .get(last + 1)
+        .is_some_and(|t| is_arithmetic(t.token_type));
+    // Same direction, one bound inclusive and the other not.
+    (op1.0 == op2.0 && op1.1 != op2.1 && !tight_after).then_some((i + used + 1, last))
+}
+
+/// An inequality as (points up, inclusive): `lt` is (true, false).
+fn bound_op(ty: TokenType) -> Option<(bool, bool)> {
+    match ty {
+        TokenType::LT | TokenType::KwLT => Some((true, false)),
+        TokenType::LE | TokenType::KwLE => Some((true, true)),
+        TokenType::GT | TokenType::KwGT => Some((false, false)),
+        TokenType::GE | TokenType::KwGE => Some((false, true)),
+        _ => None,
+    }
 }
 
 /// What makes an assignment's right-hand side fractional, if anything:

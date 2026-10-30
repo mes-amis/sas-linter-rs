@@ -113,3 +113,21 @@ fn silent_on_clean_fixture() {
         findings.iter().map(|f| &f.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_colon_range_outside_the_values_is_one_finding() {
+    let src = "if SCORE in (0:9) then cOut = 1;\n";
+    assert_eq!(reported(src), vec!["1:14"]);
+    let messages: Vec<String> = linter()
+        .lint(src, "example.sas")
+        .into_iter()
+        .filter(|f| f.rule == "variable_value_out_of_known_range")
+        .map(|f| f.message)
+        .collect();
+    assert!(
+        messages[0].starts_with("values 6:9 for SCORE are outside"),
+        "{:?}",
+        messages
+    );
+    assert!(reported("if SCORE in (0:5) then cOut = 1;\n").is_empty());
+}

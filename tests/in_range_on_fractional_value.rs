@@ -164,3 +164,58 @@ fn autofix_output_is_quiet() {
     assert!(fixed.contains("5 le bmi le 70"), "{}", fixed);
     assert!(findings(&fixed).is_empty(), "{}", fixed);
 }
+
+fn configured(yaml: &str) -> sas_linter::Linter {
+    let cfg: sas_linter::Config =
+        serde_yaml::from_str(&format!("rules:\n  {}:\n{}", RULE, yaml)).expect("config parses");
+    sas_linter::Linter::from_config(&cfg).expect("linter builds")
+}
+
+fn configured_findings(yaml: &str, src: &str) -> Vec<sas_linter::Finding> {
+    configured(yaml)
+        .lint(src, "example.sas")
+        .into_iter()
+        .filter(|f| f.rule == RULE)
+        .collect()
+}
+
+#[test]
+fn half_open_ranges_count_only_when_enabled() {
+    let src = "if 18 le x lt 30 then y = 1;\nif x in (5:70) then y = 2;\n";
+    assert!(findings(src).is_empty());
+    let f = configured_findings("    half_open_ranges: true\n", src);
+    assert_eq!(f.len(), 1);
+    assert!(
+        f[0].message
+            .contains("compared as a half-open range (`18 le x lt 30`) at line 1"),
+        "{}",
+        f[0].message
+    );
+    for cond in ["30 gt x ge 18", "18 < x <= 30"] {
+        let src = format!("if {} then y = 1;\nif x in (5:70) then y = 2;\n", cond);
+        let f = configured_findings("    half_open_ranges: true\n", &src);
+        assert_eq!(f.len(), 1, "{}", cond);
+    }
+    // Both bounds inclusive, mixed directions, or arithmetic alongside.
+    for cond in ["18 le x le 30", "18 lt x gt 30", "18 le x lt 30 + z"] {
+        let src = format!("if {} then y = 1;\nif x in (5:70) then y = 2;\n", cond);
+        let f = configured_findings("    half_open_ranges: true\n", &src);
+        assert!(f.is_empty(), "{}", cond);
+    }
+}
+
+#[test]
+fn decimal_catalog_entries_count() {
+    let csv = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lints/in_range_on_fractional_value/values.csv");
+    let yaml = format!("    csv_paths:\n      - {}\n", csv.display());
+    let src = "if bmi in (5:70) then y = 1;\nif count in (1:5) then y = 2;\n";
+    assert!(findings(src).is_empty());
+    let f = configured_findings(&yaml, src);
+    assert_eq!(f.len(), 1, "{:?}", f);
+    assert_eq!(
+        f[0].message,
+        "`bmi in (5:70)` only matches whole numbers; bmi is documented with decimal \
+         values 0 to 99.9 in the values catalog. Use `5 le bmi le 70` to include fractions."
+    );
+}
