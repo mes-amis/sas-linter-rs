@@ -41,6 +41,12 @@ impl Linter {
         self.lint_with_fixes(source, path).0
     }
 
+    /// Findings about the rules' configured inputs (see
+    /// `Rule::check_inputs`) — run once, not per source.
+    pub fn lint_inputs(&self) -> Vec<Finding> {
+        self.rules.iter().flat_map(|r| r.check_inputs()).collect()
+    }
+
     /// Returns `(findings, modified_source)`. When no rule has autofix
     /// enabled, `modified_source` equals the input.
     pub fn lint_with_fixes(&self, source: &str, path: &str) -> (Vec<Finding>, String) {

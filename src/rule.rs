@@ -60,6 +60,12 @@ pub trait Rule: Send + Sync {
         Hook::AfterFormat
     }
     fn check(&self, ctx: &CheckContext) -> Vec<Finding>;
+    /// Findings about the rule's own inputs (a configured catalog) rather
+    /// than any one source. Reported once per run, located in the input
+    /// file.
+    fn check_inputs(&self) -> Vec<Finding> {
+        Vec::new()
+    }
     fn autofix(&self, source: &str) -> String {
         source.to_string()
     }

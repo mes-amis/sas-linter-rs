@@ -4,7 +4,8 @@
 //! outside the documented values) and `sas-lint synthesize` (seed each
 //! input's value set). Both read the same `csv_paths` / `name_column` /
 //! `values_column` / `delimiter` / `name_match` options from the rule's
-//! config entry.
+//! config entry. `catalog_vector_mismatch` reads them too, plus
+//! `vector_column`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use crate::config::{opt_seq_str, opt_str};
 
 pub const DEFAULT_NAME_COLUMN: &str = "Variable";
 pub const DEFAULT_VALUES_COLUMN: &str = "Acceptable Values";
+pub const DEFAULT_VECTOR_COLUMN: &str = "Vector";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NameMatch {
@@ -45,6 +47,9 @@ pub struct SpecSource {
     pub csv_paths: Vec<PathBuf>,
     pub name_column: String,
     pub values_column: String,
+    /// The column that spells the acceptable values out one by one; read
+    /// only by `catalog_vector_mismatch`.
+    pub vector_column: String,
     pub name_match: NameMatch,
     pub delimiter: u8,
 }
@@ -55,6 +60,7 @@ impl Default for SpecSource {
             csv_paths: Vec::new(),
             name_column: DEFAULT_NAME_COLUMN.into(),
             values_column: DEFAULT_VALUES_COLUMN.into(),
+            vector_column: DEFAULT_VECTOR_COLUMN.into(),
             name_match: NameMatch::CaseInsensitive,
             delimiter: b',',
         }
@@ -83,6 +89,9 @@ impl SpecSource {
                 .into(),
             values_column: opt_str(opts, "values_column")
                 .unwrap_or(DEFAULT_VALUES_COLUMN)
+                .into(),
+            vector_column: opt_str(opts, "vector_column")
+                .unwrap_or(DEFAULT_VECTOR_COLUMN)
                 .into(),
             name_match,
             delimiter: delimiter.as_bytes().first().copied().unwrap_or(b','),

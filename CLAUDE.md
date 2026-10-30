@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships 27 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent, and on-by-default banner-comment + assignment alignment passes in `src/align.rs`), and a `synthesize` subcommand (`src/synthesize.rs`) that samples CSV input testdata from each source's `if`-predicate graph — a weighted strategy mix (`--weights`), or `--minimal`'s greedy 100%-branch-coverage row set. The acceptable-values catalog loader (`src/value_specs.rs`) is shared between `synthesize` and `variable_value_out_of_known_range`. Targets Rust 1.82+.
+Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships 28 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent, and on-by-default banner-comment + assignment alignment passes in `src/align.rs`), and a `synthesize` subcommand (`src/synthesize.rs`) that samples CSV input testdata from each source's `if`-predicate graph — a weighted strategy mix (`--weights`), or `--minimal`'s greedy 100%-branch-coverage row set. The acceptable-values catalog loader (`src/value_specs.rs`) is shared between `synthesize` and `variable_value_out_of_known_range`; `catalog_vector_mismatch` checks that catalog itself (values vs `Vector` column) via `Rule::check_inputs`, which `main` runs once per invocation rather than per source. Targets Rust 1.82+.
 
 ## Commands
 

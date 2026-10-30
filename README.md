@@ -335,6 +335,11 @@ rules:
     delimiter: ","
     name_match: case_insensitive
 
+  catalog_vector_mismatch:
+    enabled: true              # checks the catalog itself, once per run, not each source
+    # csv_paths: [...]         # omitted → the variable_value_out_of_known_range catalog and columns
+    vector_column: "Vector"    # default; the values column spelled out one value at a time
+
   invalid_numeric_literal:
     enabled: true              # reject INTEGER_LITERAL tokens the lexer accepts but SAS doesn't (`1f`, `1d2`, …)
 
@@ -467,6 +472,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `statement_not_valid` | A statement in open code or a data step that doesn't start like any SAS statement — bare text (a filename line above the header), stray punctuation (`*/.`), a `*` comment cut short by an embedded `;`. Accepts keywords, assignments (`x =`, `a{i} =`, `'n'n =`), sum statements, labels, hash method calls and macro code. PROC bodies are skipped; `run;` ends a PROC except run-group PROCs (`datasets`, `reg`, `sql`, …), which end at `quit;`. SAS fails with `ERROR 180-322`. Report-only. |
 | `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
 | `in_range_on_fractional_value` | `VAR in (… N:M …)` where `VAR` can hold a fraction. A colon range in an `in` list stands for the whole numbers `N, N+1, …, M`, so `bmi in (5:70)` is false for `28.4` — SAS compiles it without a note. `VAR` counts as fractional when the file assigns it a division, a non-integer literal, a negative or fractional power, or a function such as `sqrt` / `mean` / `exp` (not inside `floor`, `int`, `round(x)` and other whole-number functions), or else compares it with a non-integer literal (`bmi < 18.5`), or — with `half_open_ranges: true` — as a half-open range (`18 le bmi lt 30`, off by default since whole-number values are written that way too). Failing those, a configured catalog (`csv_paths`, read like `variable_value_out_of_known_range`'s) whose entry for `VAR` is a decimal range (`0.0-99.9`) counts. Variables it can't reason about are left alone. One finding per range. Autofix rewrites a list that is a single range to `N le VAR le M`; mixed lists and `not in` are report-only. |
+| `catalog_vector_mismatch` | A catalog row whose values column and vector column name different values: `1-3,8` beside `1,2,3,4,5,6,7,8` (a vector filled in from min to max admits the gap `4-7`), only one of the two a value list (a description with an unquoted delimiter shifted the columns), or one of them empty. Both are read as whole numbers and `lo-hi` ranges and compared as sets, so `0-2` and `0,1,2` agree; rows where neither is a value list are skipped, and a range of 1000+ values agrees with a vector of its two ends. Reads the `variable_value_out_of_known_range` catalog and columns unless given its own `csv_paths`, so it runs as soon as that catalog is configured; `vector_column` (default `Vector`) names the column, and a catalog without one is skipped. Reported once per run at `catalog.csv:ROW:1`, however many sources are linted. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.
 

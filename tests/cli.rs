@@ -285,3 +285,40 @@ fn synthesize_minimal_adds_catalog_boundary_values() {
     // Four distinct edges per input is the floor, and they pack into it.
     assert_eq!(rows.len(), 4);
 }
+
+#[test]
+fn catalog_findings_are_reported_once_per_run() {
+    let dir = synth_tmp("catalog");
+    let config = dir.join("lint.yaml");
+    std::fs::write(
+        &config,
+        "rules:\n  variable_value_out_of_known_range:\n    \
+         csv_paths: [tests/fixtures/lints/catalog_vector_mismatch/catalog.csv]\n    \
+         delimiter: \";\"\n",
+    )
+    .unwrap();
+    let clean = fixture("catalog_vector_mismatch", "clean.sas");
+    let out = Command::new(bin())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .arg("--config")
+        .arg(&config)
+        .arg(&clean)
+        .arg(&clean)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{stdout}");
+    assert_eq!(
+        lines[0],
+        "tests/fixtures/lints/catalog_vector_mismatch/catalog.csv:4:1: \
+         [catalog_vector_mismatch] V3: Acceptable Values `1-3,8` and Vector \
+         `1,2,3,4,5,6,7,8` disagree: Vector adds 4-7"
+    );
+}

@@ -191,7 +191,12 @@ fn run() -> Result<ExitCode> {
         Linter::from_config(&cfg)?
     };
 
-    let mut exit_code: u8 = 0;
+    // Findings about configured inputs (the catalog), once per run.
+    let input_findings = linter.lint_inputs();
+    let mut exit_code: u8 = if input_findings.is_empty() { 0 } else { 1 };
+    for f in input_findings {
+        println!("{}", f);
+    }
     for path in &cli.files {
         if !path.is_file() {
             eprintln!("sas-lint: {}: not a regular file", path.display());

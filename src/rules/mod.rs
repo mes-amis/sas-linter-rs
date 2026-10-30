@@ -4,6 +4,7 @@ use crate::config::{opt_str, Config};
 use crate::finding::Finding;
 use crate::rule::{CheckContext, Hook, Rule};
 
+pub mod catalog_vector_mismatch;
 pub mod choose_one_template;
 pub mod commented_out_guard;
 pub mod condition;
@@ -74,6 +75,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         statement_not_valid::meta(),
         unescaped_quote_in_string::meta(),
         in_range_on_fractional_value::meta(),
+        catalog_vector_mismatch::meta(),
     ]
 }
 
@@ -169,6 +171,37 @@ pub fn rules_by_ids(ids: &[String]) -> Result<Vec<Box<dyn Rule>>> {
     Ok(out)
 }
 
+/// Rules that check the acceptable-values catalog itself. Without a
+/// `csv_paths` of their own they read the one configured for
+/// `CATALOG_OWNER`, so configuring the catalog once turns them on.
+const CATALOG_CHECKERS: &[&str] = &["catalog_vector_mismatch"];
+const CATALOG_OWNER: &str = "variable_value_out_of_known_range";
+const CATALOG_KEYS: &[&str] = &[
+    "csv_paths",
+    "name_column",
+    "values_column",
+    "vector_column",
+    "delimiter",
+    "name_match",
+];
+
+/// `opts`, with `CATALOG_OWNER`'s catalog options filled in under it when
+/// `id` is a catalog checker that names no `csv_paths`.
+fn inherit_catalog(id: &str, opts: &serde_yaml::Value, config: &Config) -> serde_yaml::Value {
+    let owner = config.rules.get(CATALOG_OWNER);
+    let (true, None, Some(owner)) = (CATALOG_CHECKERS.contains(&id), opts.get("csv_paths"), owner)
+    else {
+        return opts.clone();
+    };
+    let mut merged = opts.as_mapping().cloned().unwrap_or_default();
+    for key in CATALOG_KEYS {
+        if let Some(v) = owner.get(*key) {
+            merged.entry((*key).into()).or_insert_with(|| v.clone());
+        }
+    }
+    serde_yaml::Value::Mapping(merged)
+}
+
 pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
     let metas = all_metas();
     let mut out: Vec<Box<dyn Rule>> = Vec::new();
@@ -191,8 +224,9 @@ pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
                 known.join(", ")
             )
         })?;
-        let rule = (m.config_factory)(opts)?;
-        out.push(match opt_str(opts, "hook") {
+        let opts = inherit_catalog(current, opts, config);
+        let rule = (m.config_factory)(&opts)?;
+        out.push(match opt_str(&opts, "hook") {
             Some(h) => Box::new(HookOverride {
                 inner: rule,
                 hook: Hook::parse(h).map_err(|e| anyhow!("{}.{}", id, e))?,
@@ -208,7 +242,12 @@ pub fn rules_from_config(config: &Config) -> Result<Vec<Box<dyn Rule>>> {
         config.rules.keys().map(|id| current_id(id)).collect();
     for m in &metas {
         if !configured.contains(m.id) {
-            out.push((m.default_factory)());
+            let opts = inherit_catalog(m.id, &serde_yaml::Value::Null, config);
+            out.push(if opts.is_null() {
+                (m.default_factory)()
+            } else {
+                (m.config_factory)(&opts)?
+            });
         }
     }
 

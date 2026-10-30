@@ -148,7 +148,9 @@ export class DiagnosticsRunner {
         vscode.window.showErrorMessage(`sas-linter: ${result.stderr.trim() || "exit 2"}`);
         return;
       }
-      const findings = parseFindings(result.stdout);
+      // sas-lint echoes the path as given; findings about other files
+      // (catalog rows) don't belong on this buffer.
+      const findings = parseFindings(result.stdout).filter((f) => f.path === tmp);
       const lineText = (n: number): string => (n < doc.lineCount ? doc.lineAt(n).text : "");
       const diagnostics = findings.map((f) => findingToDiagnostic(f, lineText));
       this.collection.set(doc.uri, diagnostics);
