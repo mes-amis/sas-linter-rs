@@ -17,6 +17,7 @@ export const AUTOFIX_RULES: ReadonlyArray<string> = [
   "proc_statement_missing_semicolon",
   "orphan_format_range",
   "unescaped_quote_in_string",
+  "in_range_on_fractional_value",
 ];
 
 export function isAutofixable(ruleId: string): boolean {

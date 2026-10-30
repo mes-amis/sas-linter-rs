@@ -8,12 +8,12 @@ No Ruby, no RubyGems, no Cargo at runtime — download a prebuilt binary for you
 
 ### Prebuilt binaries
 
-Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.6.2**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
+Every `v*` tag publishes a [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases) with statically-linked binaries. The commands below install the current release, **v0.7.0**, and are kept in step with `Cargo.toml` by `tests/release_versions.rs` — bump the version and the test tells you to update them.
 
 **macOS (Apple Silicon)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.2/sas-lint-v0.6.2-aarch64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-aarch64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -21,7 +21,7 @@ sas-lint --version
 **macOS (Intel)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.2/sas-lint-v0.6.2-x86_64-apple-darwin
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-x86_64-apple-darwin
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -29,7 +29,7 @@ sas-lint --version
 **Linux (x86_64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.2/sas-lint-v0.6.2-x86_64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-x86_64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -37,7 +37,7 @@ sas-lint --version
 **Linux (arm64)**
 
 ```sh
-curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.2/sas-lint-v0.6.2-aarch64-unknown-linux-musl
+curl -fsSL -o sas-lint https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-aarch64-unknown-linux-musl
 chmod +x sas-lint && sudo mv sas-lint /usr/local/bin/sas-lint
 sas-lint --version
 ```
@@ -47,7 +47,7 @@ sas-lint --version
 ```powershell
 $dir = "$env:LOCALAPPDATA\sas-lint"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.6.2/sas-lint-v0.6.2-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/v0.7.0/sas-lint-v0.7.0-x86_64-pc-windows-msvc.exe -OutFile "$dir\sas-lint.exe"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User') }
 & "$dir\sas-lint.exe" --version   # open a new terminal for plain `sas-lint` to resolve
@@ -72,19 +72,19 @@ Rust 1.82+ required.
 
 A first-party extension lives at [`editors/vscode`](editors/vscode). Each `vscode-v*` tag publishes a `.vsix` on the corresponding [GitHub release](https://github.com/mes-amis/sas-linter-rs/releases). The asset name uses the extension's `package.json` version (no `v` prefix), while the release tag has one.
 
-The current extension release is **vscode-v0.4.2** (also kept in step by `tests/release_versions.rs`).
+The current extension release is **vscode-v0.4.3** (also kept in step by `tests/release_versions.rs`).
 
 **macOS / Linux**
 
 ```sh
-curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.2/sas-linter-vscode-0.4.2.vsix
+curl -fsSL -o /tmp/sas-linter-vscode.vsix https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.3/sas-linter-vscode-0.4.3.vsix
 code --install-extension /tmp/sas-linter-vscode.vsix
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.2/sas-linter-vscode-0.4.2.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
+Invoke-WebRequest https://github.com/mes-amis/sas-linter-rs/releases/download/vscode-v0.4.3/sas-linter-vscode-0.4.3.vsix -OutFile "$env:TEMP\sas-linter-vscode.vsix"
 code --install-extension "$env:TEMP\sas-linter-vscode.vsix"
 ```
 
@@ -325,6 +325,16 @@ rules:
   undefined_format:
     enabled: true              # skipped when the file has no proc format, or uses fmtsearch / %include
 
+  in_range_on_fractional_value:
+    enabled: true
+    autofix: false             # rewrite `VAR in (N:M)` to `N le VAR le M`
+    half_open_ranges: false    # also treat `18 le VAR lt 30` as a sign VAR holds fractions
+    csv_paths: []              # optional catalog: a decimal range (`0.0-99.9`) marks VAR as fractional
+    name_column: "Variable"    # same catalog options as variable_value_out_of_known_range
+    values_column: "Acceptable Values"
+    delimiter: ","
+    name_match: case_insensitive
+
   invalid_numeric_literal:
     enabled: true              # reject INTEGER_LITERAL tokens the lexer accepts but SAS doesn't (`1f`, `1d2`, …)
 
@@ -430,8 +440,8 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 
 | rule id | description |
 |---|---|
-| `unreachable_inner_branch_value` | Outer `if VAR in (S) then do;` guards an inner branch that tests `VAR` against a value outside `S`. Every `VAR in (…)` / `VAR = N` conjunct of an `and` chain is checked, in nested `if`s and `else if` arms alike, and a compound guard (`if A in (…) and B in (…) then do;`) restricts each of its variables. Conditions with `or` (`|`, `!`), `not` or `ne` are left alone; `&` is `and`. String values compare as SAS compares them (quote style and trailing blanks ignored). A guard stops restricting a variable once the block may assign it (assignment, sum statement, `do` index, `input`, `call` argument, array element), and stops restricting every variable at `set` / `merge` / `update` / `modify`. |
-| `unreachable_else_if_branch` | An `else if` arm whose condition is already covered by an earlier arm of the same `if` / `else if` chain, so it can never fire. Catches exact repeats (conjunct order, `in (…)` order, case and whitespace ignored) and subsumption — a smaller `in` set, a narrower `lt`/`le`/`gt`/`ge` range, or a point value inside an earlier range, on the same variable. Arms with function calls, `or`, negation or arithmetic are only matched by an exact repeat; each nested chain is checked on its own. Report-only. |
+| `unreachable_inner_branch_value` | Outer `if VAR in (S) then do;` guards an inner branch that tests `VAR` against a value outside `S`. A colon range in an `in` list (`VAR in (1:4)`) stands for its whole-number members, up to 1000 of them; a range's dead members are reported as one finding (`values 5:10`). Every `VAR in (…)` / `VAR = N` conjunct of an `and` chain is checked, in nested `if`s and `else if` arms alike, and a compound guard (`if A in (…) and B in (…) then do;`) restricts each of its variables. Conditions with `or` (`|`, `!`), `not` or `ne` are left alone; `&` is `and`. String values compare as SAS compares them (quote style and trailing blanks ignored). A guard stops restricting a variable once the block may assign it (assignment, sum statement, `do` index, `input`, `call` argument, array element), and stops restricting every variable at `set` / `merge` / `update` / `modify`. |
+| `unreachable_else_if_branch` | An `else if` arm whose condition is already covered by an earlier arm of the same `if` / `else if` chain, so it can never fire. Catches exact repeats (conjunct order, `in (…)` order, case and whitespace ignored) and subsumption — a smaller `in` set (colon ranges such as `in (1:5)` count as their whole-number members), a narrower `lt`/`le`/`gt`/`ge` range, or a point value inside an earlier range, on the same variable. Arms with function calls, `or`, negation or arithmetic are only matched by an exact repeat; each nested chain is checked on its own. Report-only. |
 | `identical_if_else_branches` | `if COND then S; else S;` with identical bodies — almost always a copy-paste error. Names and keywords compare case-insensitively; string literals compare exactly. |
 | `commented_out_guard` | SAS line-comment `* if ... then do;` pattern indicating a disabled outer validity guard. |
 | `choose_one_template` | `** CHOOSE ONE OF THE BELOW STATEMENTS;` banner indicating a broken-by-default source. |
@@ -448,7 +458,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `unbalanced_do_block` | `do` / `end` nesting that doesn't balance — each unclosed `do` is reported at its own line, plus any stray `end`. In SAS this is a hard compile error (`ERROR 117-185: There were N unclosed DO blocks.`) reported with no line number. Data-step `select` blocks, PROC SQL `case … end`, PROC TEMPLATE `define` / `edit` and PROC DS2 `method` blocks consume an `end` too and are tracked; other PROCs aren't counted. A file goes silent only when a `%do` / `%macro` body leaves a block open or closes one it didn't open. Report-only by design — where a missing `end` belongs is a semantic decision. |
 | `malformed_label_statement` | `label VAR 'text';` is missing the `=` between the variable name and the label string, or a `label` statement is missing its `;` so a following statement keyword (`attrib`, `label`, `format`, `if`, `run`, …) is swallowed into it. Autofix inserts the `=` / `;`. |
 | `invalid_numeric_literal` | INTEGER_LITERAL tokens whose text isn't actually a valid SAS numeric literal (e.g. `1f`, `1d2`). |
-| `variable_value_out_of_known_range` | `VAR = N` / `VAR in (...)` tests that stand alone as an `and` / `or` operand of an `if` condition (not inside arithmetic such as `y + VAR = 5`) use literals outside the variable's documented acceptable values. Loads the catalog from one or more CSVs with configurable column names and column separator (`,`, `;`, tab). |
+| `variable_value_out_of_known_range` | `VAR = N` / `VAR in (...)` tests that stand alone as an `and` / `or` operand of an `if` condition (not inside arithmetic such as `y + VAR = 5`) use literals outside the variable's documented acceptable values. A colon range (`VAR in (0:9)`) is checked member by member and reported once at the range (`values 6:9`). Loads the catalog from one or more CSVs with configurable column names and column separator (`,`, `;`, tab). |
 | `invalid_conventional_variable` | Identifier matches a configured naming convention regex but isn't in the catalog. Reports the closest Levenshtein matches as "did you mean?" hints. `allow_list` entries are matched literally; entries wrapped in `/.../` are matched as regexes. No-op until both `pattern` and `csv_paths` are configured. |
 | `inconsistent_variable_case` | Identifier appears with more than one casing in the same file (`myVar` vs `MyVar`). SAS treats both as the same variable; autofix rewrites every minority spelling to the most-common form. Only data-step variable positions count — dataset names, function / CALL names, statement labels, `format.` / `lib.member` references and PROC step bodies are skipped. |
 | `format_for_unknown_variable` | `format` / `informat` / `attrib` / `label` statement assigns a format or label to a variable that's referenced nowhere else in the file — almost always a typo. PROC steps are skipped (their statements name the input dataset's variables), as are files that pull in columns via `set` / `merge` / `update` / `modify` / `infile` / `input` (including `if … then set …`). Variable ranges (`x1-x3`, `a--c`) are understood. |
@@ -456,6 +466,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `orphan_format_range` | Inside `proc format`, a statement that starts with a literal, range, `low` / `high` or `other` followed by `=`, right after a `value` / `invalue` / `picture` statement — a stray `;` closed the definition early and SAS fails with `ERROR 180-322`. Autofix removes that `;`. |
 | `statement_not_valid` | A statement in open code or a data step that doesn't start like any SAS statement — bare text (a filename line above the header), stray punctuation (`*/.`), a `*` comment cut short by an embedded `;`. Accepts keywords, assignments (`x =`, `a{i} =`, `'n'n =`), sum statements, labels, hash method calls and macro code. PROC bodies are skipped; `run;` ends a PROC except run-group PROCs (`datasets`, `reg`, `sql`, …), which end at `quit;`. SAS fails with `ERROR 180-322`. Report-only. |
 | `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
+| `in_range_on_fractional_value` | `VAR in (… N:M …)` where `VAR` can hold a fraction. A colon range in an `in` list stands for the whole numbers `N, N+1, …, M`, so `bmi in (5:70)` is false for `28.4` — SAS compiles it without a note. `VAR` counts as fractional when the file assigns it a division, a non-integer literal, a negative or fractional power, or a function such as `sqrt` / `mean` / `exp` (not inside `floor`, `int`, `round(x)` and other whole-number functions), or else compares it with a non-integer literal (`bmi < 18.5`), or — with `half_open_ranges: true` — as a half-open range (`18 le bmi lt 30`, off by default since whole-number values are written that way too). Failing those, a configured catalog (`csv_paths`, read like `variable_value_out_of_known_range`'s) whose entry for `VAR` is a decimal range (`0.0-99.9`) counts. Variables it can't reason about are left alone. One finding per range. Autofix rewrites a list that is a single range to `N le VAR le M`; mixed lists and `not in` are report-only. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.
 

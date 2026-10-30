@@ -10,6 +10,7 @@ pub mod condition;
 pub mod encoding_issues;
 pub mod format_for_unknown_variable;
 pub mod identical_if_else_branches;
+pub mod in_range_on_fractional_value;
 pub mod inconsistent_variable_case;
 pub mod invalid_assignment_target;
 pub mod invalid_conventional_variable;
@@ -72,6 +73,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         orphan_format_range::meta(),
         statement_not_valid::meta(),
         unescaped_quote_in_string::meta(),
+        in_range_on_fractional_value::meta(),
     ]
 }
 
@@ -101,6 +103,8 @@ pub const AUTOFIX_ORDER: &[&str] = &[
     // 4. Names, once the code they appear in is final.
     "invalid_assignment_target",
     "inconsistent_variable_case",
+    // 5. Expressions, once statements and names are settled.
+    "in_range_on_fractional_value",
 ];
 
 /// When a rule reports a line, findings on that line from the rules listed

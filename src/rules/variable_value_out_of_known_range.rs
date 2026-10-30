@@ -99,15 +99,20 @@ impl VariableValueOutOfKnownRange {
         let Some(spec) = specs.lookup(&cmp.var.text) else {
             return vec![];
         };
-        cmp.values
+        let outside: Vec<&condition::Value> = cmp
+            .values
             .iter()
             .filter(|v| v.lit.as_f64().is_some_and(|n| !value_allowed(spec, n)))
-            .map(|v| Finding {
+            .collect();
+        // A colon range's out-of-range members are one finding at the range.
+        condition::group_by_literal(&outside)
+            .into_iter()
+            .map(|(tok, display, n)| Finding {
                 path: path.to_string(),
-                line: v.tok.start_line,
-                column: v.tok.start_column + 1,
+                line: tok.start_line,
+                column: tok.start_column + 1,
                 rule: ID,
-                message: format_message(&cmp.var.text, &v.display, spec),
+                message: format_message(&cmp.var.text, &display, n, spec),
                 severity: Severity::Warning,
             })
             .collect()
@@ -128,7 +133,7 @@ fn value_allowed(spec: &Spec, n: f64) -> bool {
     }
 }
 
-fn format_message(ident: &str, display: &str, spec: &Spec) -> String {
+fn format_message(ident: &str, display: &str, count: usize, spec: &Spec) -> String {
     let allowed_str = match &spec.kind {
         SpecKind::Range(lo, hi) => format!("{}..{}", lo, hi),
         SpecKind::Decimal(lo, hi) => format!("{}..{}", lo, hi),
@@ -138,9 +143,14 @@ fn format_message(ident: &str, display: &str, spec: &Spec) -> String {
             format!("{{{}}}", parts.join(", "))
         }
     };
+    let (noun, verb) = if count == 1 {
+        ("value", "is")
+    } else {
+        ("values", "are")
+    };
     format!(
-        "value {} for {} is outside the documented acceptable values ({}); \
+        "{} {} for {} {} outside the documented acceptable values ({}); \
          this branch is unreachable.",
-        display, ident, allowed_str
+        noun, display, ident, verb, allowed_str
     )
 }

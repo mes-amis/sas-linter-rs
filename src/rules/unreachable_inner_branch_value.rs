@@ -293,21 +293,29 @@ fn analyze_if(
             // Every value excluded: the test can never be true, so the
             // whole branch is dead. Some excluded: the branch still fires
             // for the live values, only the dead ones are noise.
-            let verdict = if dead.len() == cmp.values.len() {
-                "this branch is unreachable."
-            } else {
-                "this branch can never fire for that value."
-            };
-            for val in dead {
+            let all_dead = dead.len() == cmp.values.len();
+            // A colon range's dead members are one finding at the range.
+            for (tok, display, n) in condition::group_by_literal(&dead) {
+                let verdict = match (all_dead, n) {
+                    (true, _) => "this branch is unreachable.",
+                    (false, 1) => "this branch can never fire for that value.",
+                    (false, _) => "this branch can never fire for those values.",
+                };
                 findings.push(Finding {
                     path: path.to_string(),
-                    line: val.tok.start_line,
-                    column: val.tok.start_column + 1,
+                    line: tok.start_line,
+                    column: tok.start_column + 1,
                     rule: ID,
                     message: format!(
-                        "value {} for {} is excluded by the enclosing \
+                        "{} {} for {} {} excluded by the enclosing \
                          `if {}` guard at line {}; {}",
-                        val.display, cmp.var.text, frame.text, frame.line, verdict
+                        if n == 1 { "value" } else { "values" },
+                        display,
+                        cmp.var.text,
+                        if n == 1 { "is" } else { "are" },
+                        frame.text,
+                        frame.line,
+                        verdict
                     ),
                     severity: Severity::Warning,
                 });
