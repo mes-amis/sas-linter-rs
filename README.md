@@ -147,6 +147,10 @@ sas-lint synthesize --weights single=3,combo=1 --combo-size 2-4 algo.sas -o algo
 
 # Fewest rows that drive every `if` both ways (100% branch coverage)
 sas-lint synthesize --minimal algo.sas -o algo_min.csv
+
+# Check the acceptable-values catalog against its own Vector column
+sas-lint check-catalog --config my-lint.yaml
+sas-lint check-catalog --config my-lint.yaml metadata/other-variables.csv
 ```
 
 Exit codes: `0` clean, `1` findings, `2` invalid args.
@@ -255,6 +259,37 @@ setup is needed when that rule is already configured.
 needs exactly one source. A `.sas` / `.txt` extension is dropped from the
 output name.
 
+### `check-catalog`
+
+Each row of an acceptable-values catalog states its values twice: compactly
+in the values column (`1-3,8`) and spelled out in a vector column
+(`1,2,3,8`). When the two drift apart, the linter (which reads the values
+column) and whatever consumes the vector disagree about what a variable can
+hold. `check-catalog` reports every row where they do:
+
+```
+metadata/variables.csv:12: Q7: Acceptable Values `1-3,8` and Vector `1,2,3,4,5,6,7,8` disagree: Vector adds 4-7
+metadata/variables.csv:40: Q9: Vector `0,1` is a value list but Acceptable Values `Early onset` is not (shifted column?)
+metadata/variables.csv:57: Q12: Vector is empty but Acceptable Values is `0,1,2,3,4`
+```
+
+Both columns are read as comma-separated whole numbers and `lo-hi` ranges
+and compared as sets, so `0-2` and `0,1,2` agree. A row where only one
+column is a value list usually means a description holding an unquoted
+delimiter pushed the columns over. Rows where neither column is a value
+list (text, `yyyymmdd` dates, decimal ranges) are skipped, and a range of
+1000 or more values agrees with a vector of just its two ends
+(`0-9999999999999` / `0,9999999999999`).
+
+The catalog files and columns come from the
+`variable_value_out_of_known_range` entry in `--config` (`csv_paths`,
+`name_column`, `values_column`, `delimiter`, plus `vector_column`, default
+`Vector`). CSVs named on the command line replace `csv_paths`;
+`--vector-column` overrides `vector_column`. Exit codes: `0` every row
+agrees, `1` contradictions reported, `2` no catalog, a missing file, or a
+missing column. Run it in CI on the metadata repo to stop new
+contradictions from landing.
+
 ## YAML config
 
 Every rule with options, plus its defaults. Rules omitted from the config default to enabled with no options, so adding a new rule to `sas-linter` won't silently disable it for users with existing configs. To suppress a rule, list it with `enabled: false`.
@@ -345,6 +380,7 @@ rules:
       - metadata/variables-extra.csv
     name_column: "Variable"             # default
     values_column: "Acceptable Values"  # default
+    vector_column: "Vector"             # default; read only by `sas-lint check-catalog`
     name_match: case_insensitive        # case_insensitive | exact
     delimiter: ","                      # CSV column separator: "," | ";" | "\t"
 

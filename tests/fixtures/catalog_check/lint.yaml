@@ -1,0 +1,5 @@
+rules:
+  variable_value_out_of_known_range:
+    csv_paths:
+      - tests/fixtures/catalog_check/catalog.csv
+    delimiter: ";"

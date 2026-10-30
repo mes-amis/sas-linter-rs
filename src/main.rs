@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use sas_linter::encoding::read_source;
 use sas_linter::value_specs::{SpecSource, ValueSpecs};
-use sas_linter::{rules, synthesize, Config, Formatter, Linter};
+use sas_linter::{catalog_check, rules, synthesize, Config, Formatter, Linter};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,6 +69,30 @@ enum Command {
     ///
     /// Deterministic for a given --seed.
     Synthesize(SynthesizeArgs),
+
+    /// Check that each acceptable-values catalog row agrees with itself.
+    ///
+    /// Compares every row's values column (`1-3,8`) with its vector column
+    /// (`1,2,3,8`) and reports rows that name different values, or where
+    /// only one of the two is a value list (often a shifted column). Reads
+    /// the catalog files and column options from the config's
+    /// `variable_value_out_of_known_range` entry unless CSVs are given.
+    CheckCatalog(CheckCatalogArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct CheckCatalogArgs {
+    /// YAML config whose `variable_value_out_of_known_range` options
+    /// locate the catalog and name its columns. Missing file → defaults.
+    #[arg(long, default_value = "config/lint.yaml")]
+    config: PathBuf,
+
+    /// Vector column name. Overrides the config's `vector_column`.
+    #[arg(long)]
+    vector_column: Option<String>,
+
+    /// Catalog CSVs to check instead of the config's `csv_paths`.
+    csv_paths: Vec<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -141,6 +165,9 @@ fn run() -> Result<ExitCode> {
 
     if let Some(Command::Synthesize(args)) = &cli.command {
         return run_synthesize(args);
+    }
+    if let Some(Command::CheckCatalog(args)) = &cli.command {
+        return run_check_catalog(args);
     }
 
     if cli.list_rules {
@@ -311,6 +338,51 @@ fn run_synthesize(args: &SynthesizeArgs) -> Result<ExitCode> {
                 source.display(),
                 if *outcome { "true" } else { "false" }
             );
+        }
+    }
+    Ok(ExitCode::from(exit_code))
+}
+
+fn run_check_catalog(args: &CheckCatalogArgs) -> Result<ExitCode> {
+    let cfg = Config::load(&args.config)?;
+    let mut source = match cfg.rules.get("variable_value_out_of_known_range") {
+        Some(opts) => SpecSource::from_opts(opts)?,
+        None => SpecSource::default(),
+    };
+    if !args.csv_paths.is_empty() {
+        source.csv_paths = args.csv_paths.clone();
+    }
+    if let Some(column) = &args.vector_column {
+        source.vector_column = column.clone();
+    }
+    if source.csv_paths.is_empty() {
+        eprintln!(
+            "sas-lint check-catalog: no catalog CSVs given and none configured in {}",
+            args.config.display()
+        );
+        return Ok(ExitCode::from(2));
+    }
+
+    let mut exit_code: u8 = 0;
+    for path in &source.csv_paths {
+        if !path.is_file() {
+            eprintln!("sas-lint check-catalog: {}: no such file", path.display());
+            exit_code = 2;
+            continue;
+        }
+        let issues = match catalog_check::check_file(path, &source) {
+            Ok(issues) => issues,
+            Err(err) => {
+                eprintln!("sas-lint check-catalog: {err:#}");
+                exit_code = 2;
+                continue;
+            }
+        };
+        if !issues.is_empty() {
+            exit_code = exit_code.max(1);
+        }
+        for issue in issues {
+            println!("{}:{issue}", path.display());
         }
     }
     Ok(ExitCode::from(exit_code))
