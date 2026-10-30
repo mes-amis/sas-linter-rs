@@ -1,5 +1,4 @@
 pub mod align;
-pub mod catalog_check;
 pub mod config;
 pub mod encoding;
 pub mod finding;

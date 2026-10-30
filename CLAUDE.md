@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships 27 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent, and on-by-default banner-comment + assignment alignment passes in `src/align.rs`), and a `synthesize` subcommand (`src/synthesize.rs`) that samples CSV input testdata from each source's `if`-predicate graph — a weighted strategy mix (`--weights`), or `--minimal`'s greedy 100%-branch-coverage row set. The acceptable-values catalog loader (`src/value_specs.rs`) is shared between `synthesize` and `variable_value_out_of_known_range`; a `check-catalog` subcommand (`src/catalog_check.rs`) reads the same options to flag catalog rows whose values and `Vector` columns disagree. Targets Rust 1.82+.
+Rust port of the Ruby [`sas-linter`](https://github.com/mes-amis/sas-linter) gem. Single binary `sas-lint` + library `sas_linter`, built on `sas-lexer`. Ships 28 pluggable rules plus a `--format` mode (keyword casing / operator spacing / indent, and on-by-default banner-comment + assignment alignment passes in `src/align.rs`), and a `synthesize` subcommand (`src/synthesize.rs`) that samples CSV input testdata from each source's `if`-predicate graph — a weighted strategy mix (`--weights`), or `--minimal`'s greedy 100%-branch-coverage row set. The acceptable-values catalog loader (`src/value_specs.rs`) is shared between `synthesize` and `variable_value_out_of_known_range`; `catalog_vector_mismatch` checks that catalog itself (values vs `Vector` column) via `Rule::check_inputs`, which `main` runs once per invocation rather than per source. Targets Rust 1.82+.
 
 ## Commands
 
@@ -20,7 +20,6 @@ cargo fmt -- --check
 ./target/release/sas-lint --config lint.yaml file.sas
 ./target/release/sas-lint --format --config lint.yaml file.sas
 ./target/release/sas-lint synthesize sources/* -o out_dir   # one <stem>.csv per source
-./target/release/sas-lint check-catalog --config lint.yaml  # values vs Vector column per catalog row
 ```
 
 CLI exit codes (mirror the Ruby gem; tests assert against these): `0` clean, `1` findings, `2` misuse / missing file / unknown rule.

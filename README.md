@@ -147,10 +147,6 @@ sas-lint synthesize --weights single=3,combo=1 --combo-size 2-4 algo.sas -o algo
 
 # Fewest rows that drive every `if` both ways (100% branch coverage)
 sas-lint synthesize --minimal algo.sas -o algo_min.csv
-
-# Check the acceptable-values catalog against its own Vector column
-sas-lint check-catalog --config my-lint.yaml
-sas-lint check-catalog --config my-lint.yaml metadata/other-variables.csv
 ```
 
 Exit codes: `0` clean, `1` findings, `2` invalid args.
@@ -259,37 +255,6 @@ setup is needed when that rule is already configured.
 needs exactly one source. A `.sas` / `.txt` extension is dropped from the
 output name.
 
-### `check-catalog`
-
-Each row of an acceptable-values catalog states its values twice: compactly
-in the values column (`1-3,8`) and spelled out in a vector column
-(`1,2,3,8`). When the two drift apart, the linter (which reads the values
-column) and whatever consumes the vector disagree about what a variable can
-hold. `check-catalog` reports every row where they do:
-
-```
-metadata/variables.csv:12: Q7: Acceptable Values `1-3,8` and Vector `1,2,3,4,5,6,7,8` disagree: Vector adds 4-7
-metadata/variables.csv:40: Q9: Vector `0,1` is a value list but Acceptable Values `Early onset` is not (shifted column?)
-metadata/variables.csv:57: Q12: Vector is empty but Acceptable Values is `0,1,2,3,4`
-```
-
-Both columns are read as comma-separated whole numbers and `lo-hi` ranges
-and compared as sets, so `0-2` and `0,1,2` agree. A row where only one
-column is a value list usually means a description holding an unquoted
-delimiter pushed the columns over. Rows where neither column is a value
-list (text, `yyyymmdd` dates, decimal ranges) are skipped, and a range of
-1000 or more values agrees with a vector of just its two ends
-(`0-9999999999999` / `0,9999999999999`).
-
-The catalog files and columns come from the
-`variable_value_out_of_known_range` entry in `--config` (`csv_paths`,
-`name_column`, `values_column`, `delimiter`, plus `vector_column`, default
-`Vector`). CSVs named on the command line replace `csv_paths`;
-`--vector-column` overrides `vector_column`. Exit codes: `0` every row
-agrees, `1` contradictions reported, `2` no catalog, a missing file, or a
-missing column. Run it in CI on the metadata repo to stop new
-contradictions from landing.
-
 ## YAML config
 
 Every rule with options, plus its defaults. Rules omitted from the config default to enabled with no options, so adding a new rule to `sas-linter` won't silently disable it for users with existing configs. To suppress a rule, list it with `enabled: false`.
@@ -370,6 +335,11 @@ rules:
     delimiter: ","
     name_match: case_insensitive
 
+  catalog_vector_mismatch:
+    enabled: true              # checks the catalog itself, once per run, not each source
+    # csv_paths: [...]         # omitted → the variable_value_out_of_known_range catalog and columns
+    vector_column: "Vector"    # default; the values column spelled out one value at a time
+
   invalid_numeric_literal:
     enabled: true              # reject INTEGER_LITERAL tokens the lexer accepts but SAS doesn't (`1f`, `1d2`, …)
 
@@ -380,7 +350,6 @@ rules:
       - metadata/variables-extra.csv
     name_column: "Variable"             # default
     values_column: "Acceptable Values"  # default
-    vector_column: "Vector"             # default; read only by `sas-lint check-catalog`
     name_match: case_insensitive        # case_insensitive | exact
     delimiter: ","                      # CSV column separator: "," | ";" | "\t"
 
@@ -503,6 +472,7 @@ let findings = linter.lint_file(std::path::Path::new("path/to/source.sas"))?;
 | `statement_not_valid` | A statement in open code or a data step that doesn't start like any SAS statement — bare text (a filename line above the header), stray punctuation (`*/.`), a `*` comment cut short by an embedded `;`. Accepts keywords, assignments (`x =`, `a{i} =`, `'n'n =`), sum statements, labels, hash method calls and macro code. PROC bodies are skipped; `run;` ends a PROC except run-group PROCs (`datasets`, `reg`, `sql`, …), which end at `quit;`. SAS fails with `ERROR 180-322`. Report-only. |
 | `undefined_format` | `format` / `informat` / `attrib … format=` names a format that the file's `proc format` doesn't define (`value` / `invalue` / `picture`) and isn't a SAS-supplied format — SAS fails with `ERROR 48-59`. Case-insensitive; a leading `$` is part of the name and width digits are ignored. Skipped on files with no `proc format` or that use `fmtsearch` / `%include`, whose formats may come from elsewhere. |
 | `in_range_on_fractional_value` | `VAR in (… N:M …)` where `VAR` can hold a fraction. A colon range in an `in` list stands for the whole numbers `N, N+1, …, M`, so `bmi in (5:70)` is false for `28.4` — SAS compiles it without a note. `VAR` counts as fractional when the file assigns it a division, a non-integer literal, a negative or fractional power, or a function such as `sqrt` / `mean` / `exp` (not inside `floor`, `int`, `round(x)` and other whole-number functions), or else compares it with a non-integer literal (`bmi < 18.5`), or — with `half_open_ranges: true` — as a half-open range (`18 le bmi lt 30`, off by default since whole-number values are written that way too). Failing those, a configured catalog (`csv_paths`, read like `variable_value_out_of_known_range`'s) whose entry for `VAR` is a decimal range (`0.0-99.9`) counts. Variables it can't reason about are left alone. One finding per range. Autofix rewrites a list that is a single range to `N le VAR le M`; mixed lists and `not in` are report-only. |
+| `catalog_vector_mismatch` | A catalog row whose values column and vector column name different values: `1-3,8` beside `1,2,3,4,5,6,7,8` (a vector filled in from min to max admits the gap `4-7`), only one of the two a value list (a description with an unquoted delimiter shifted the columns), or one of them empty. Both are read as whole numbers and `lo-hi` ranges and compared as sets, so `0-2` and `0,1,2` agree; rows where neither is a value list are skipped, and a range of 1000+ values agrees with a vector of its two ends. Reads the `variable_value_out_of_known_range` catalog and columns unless given its own `csv_paths`, so it runs as soon as that catalog is configured; `vector_column` (default `Vector`) names the column, and a catalog without one is skipped. Reported once per run at `catalog.csv:ROW:1`, however many sources are linted. |
 
 `sas-lint --list-rules` prints the same set with autofix capability.
 

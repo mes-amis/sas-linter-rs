@@ -286,18 +286,24 @@ fn synthesize_minimal_adds_catalog_boundary_values() {
     assert_eq!(rows.len(), 4);
 }
 
-fn catalog_fixture(leaf: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/catalog_check")
-        .join(leaf)
-}
-
 #[test]
-fn check_catalog_reports_rows_that_contradict_themselves() {
+fn catalog_findings_are_reported_once_per_run() {
+    let dir = synth_tmp("catalog");
+    let config = dir.join("lint.yaml");
+    std::fs::write(
+        &config,
+        "rules:\n  variable_value_out_of_known_range:\n    \
+         csv_paths: [tests/fixtures/lints/catalog_vector_mismatch/catalog.csv]\n    \
+         delimiter: \";\"\n",
+    )
+    .unwrap();
+    let clean = fixture("catalog_vector_mismatch", "clean.sas");
     let out = Command::new(bin())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["check-catalog", "--config"])
-        .arg(catalog_fixture("lint.yaml"))
+        .arg("--config")
+        .arg(&config)
+        .arg(&clean)
+        .arg(&clean)
         .output()
         .unwrap();
     assert_eq!(
@@ -308,53 +314,11 @@ fn check_catalog_reports_rows_that_contradict_themselves() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{stdout}");
     assert_eq!(
-        lines,
-        [
-            "tests/fixtures/catalog_check/catalog.csv:4: V3: Acceptable Values `1-3,8` and \
-             Vector `1,2,3,4,5,6,7,8` disagree: Vector adds 4-7",
-            "tests/fixtures/catalog_check/catalog.csv:6: V5: Vector `0,1` is a value list but \
-             Acceptable Values `with a stray delimiter` is not (shifted column?)",
-            "tests/fixtures/catalog_check/catalog.csv:7: V6: Vector is empty but \
-             Acceptable Values is `0-4`",
-        ]
+        lines[0],
+        "tests/fixtures/lints/catalog_vector_mismatch/catalog.csv:4:1: \
+         [catalog_vector_mismatch] V3: Acceptable Values `1-3,8` and Vector \
+         `1,2,3,4,5,6,7,8` disagree: Vector adds 4-7"
     );
-}
-
-#[test]
-fn check_catalog_clean_file_exits_0() {
-    let out = Command::new(bin())
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["check-catalog", "--config"])
-        .arg(catalog_fixture("lint.yaml"))
-        .arg(catalog_fixture("clean.csv"))
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "stdout: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-}
-
-#[test]
-fn check_catalog_missing_column_exits_2() {
-    // No config → `,` delimiter, so the `;`-separated header is one column.
-    let out = Command::new(bin())
-        .args(["check-catalog", "--config", "/nonexistent.yaml"])
-        .arg(catalog_fixture("clean.csv"))
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("no \"Variable\" column"));
-}
-
-#[test]
-fn check_catalog_without_csvs_exits_2() {
-    let out = Command::new(bin())
-        .args(["check-catalog", "--config", "/nonexistent.yaml"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
 }

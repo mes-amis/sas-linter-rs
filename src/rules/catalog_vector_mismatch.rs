@@ -1,5 +1,5 @@
-//! `sas-lint check-catalog`: cross-check each acceptable-values catalog
-//! row against its own vector column.
+//! Cross-check each acceptable-values catalog row against its own vector
+//! column.
 //!
 //! A catalog row states its values twice — compactly (`Acceptable Values`:
 //! `1-3,8`) and spelled out (`Vector`: `1,2,3,8`). When the two drift
@@ -9,15 +9,67 @@
 //! whose two columns name different values, and rows where only one
 //! column is a value list — usually a description with an unquoted
 //! delimiter that shifted the columns over.
+//!
+//! The findings are about the catalog, not a source, so they come from
+//! `check_inputs` — once per run, located at the CSV row.
 
-use std::fmt;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::finding::{Finding, Severity};
+use crate::rule::{CheckContext, Rule};
 use crate::value_specs::SpecSource;
+
+use super::RuleMeta;
+
+pub struct CatalogVectorMismatch {
+    source: SpecSource,
+}
+
+const ID: &str = "catalog_vector_mismatch";
+const DESCRIPTION: &str = "Acceptable-values catalog row whose values and \
+                            vector columns name different values.";
+
+pub fn meta() -> RuleMeta {
+    RuleMeta {
+        id: ID,
+        description: DESCRIPTION,
+        supports_autofix: false,
+        default_factory: || {
+            Box::new(CatalogVectorMismatch {
+                source: SpecSource::default(),
+            })
+        },
+        config_factory: |opts| {
+            Ok(Box::new(CatalogVectorMismatch {
+                source: SpecSource::from_opts(opts)?,
+            }))
+        },
+    }
+}
+
+impl Rule for CatalogVectorMismatch {
+    fn id(&self) -> &'static str {
+        ID
+    }
+    fn description(&self) -> &'static str {
+        DESCRIPTION
+    }
+
+    fn check(&self, _ctx: &CheckContext) -> Vec<Finding> {
+        Vec::new()
+    }
+
+    fn check_inputs(&self) -> Vec<Finding> {
+        self.source
+            .csv_paths
+            .iter()
+            .flat_map(|path| check_file(path, &self.source))
+            .collect()
+    }
+}
 
 /// A range at least this wide counts as too long to spell out, so a
 /// vector of just its two endpoints (`0,9999999999999` for
@@ -27,64 +79,55 @@ const SPELLED_OUT_LIMIT: i64 = 1000;
 /// Values shown per column before the text is cut short.
 const SHOWN_CHARS: usize = 40;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Issue {
-    /// 1-based line of the row in the CSV.
-    pub line: u64,
-    pub name: String,
-    pub message: String,
-}
-
-impl fmt::Display for Issue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}: {}", self.line, self.name, self.message)
-    }
-}
-
-/// Check one catalog file. Errors when the file can't be read or lacks
-/// the name, values, or vector column.
-pub fn check_file(path: &Path, source: &SpecSource) -> Result<Vec<Issue>> {
-    let mut rdr = csv::ReaderBuilder::new()
+/// Check one catalog file. Like `SpecSource::load`, a missing or
+/// unreadable file, or one without the name, values and vector columns,
+/// is skipped silently — a catalog with no vector column has nothing to
+/// cross-check.
+fn check_file(path: &Path, source: &SpecSource) -> Vec<Finding> {
+    let Ok(mut rdr) = csv::ReaderBuilder::new()
         .delimiter(source.delimiter)
         .has_headers(true)
         .flexible(true)
         .from_path(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let headers = rdr
-        .headers()
-        .with_context(|| format!("reading {}", path.display()))?
-        .clone();
-    let column = |name: &str| -> Result<usize> {
-        // A UTF-8 BOM sticks to the first header.
-        match headers
+    else {
+        return Vec::new();
+    };
+    let Ok(headers) = rdr.headers().cloned() else {
+        return Vec::new();
+    };
+    // A UTF-8 BOM sticks to the first header.
+    let column = |name: &str| {
+        headers
             .iter()
             .position(|h| h.trim_start_matches('\u{feff}') == name)
-        {
-            Some(i) => Ok(i),
-            None => bail!("{}: no {:?} column", path.display(), name),
-        }
     };
-    let name_col = column(&source.name_column)?;
-    let values_col = column(&source.values_column)?;
-    let vector_col = column(&source.vector_column)?;
+    let (Some(name_col), Some(values_col), Some(vector_col)) = (
+        column(&source.name_column),
+        column(&source.values_column),
+        column(&source.vector_column),
+    ) else {
+        return Vec::new();
+    };
 
-    let mut issues = Vec::new();
-    for record in rdr.records() {
-        let record = record.with_context(|| format!("reading {}", path.display()))?;
+    let mut findings = Vec::new();
+    for record in rdr.records().flatten() {
         let line = record.position().map_or(0, |p| p.line());
         let name = record.get(name_col).unwrap_or("").trim();
         let values = record.get(values_col).unwrap_or("").trim();
         let vector = record.get(vector_col).unwrap_or("").trim();
         if let Some(message) = compare(&source.values_column, values, &source.vector_column, vector)
         {
-            issues.push(Issue {
-                line,
-                name: name.to_string(),
-                message,
+            findings.push(Finding {
+                path: path.display().to_string(),
+                line: u32::try_from(line).unwrap_or(u32::MAX),
+                column: 1,
+                rule: ID,
+                message: format!("{name}: {message}"),
+                severity: Severity::Warning,
             });
         }
     }
-    Ok(issues)
+    findings
 }
 
 /// What's wrong between a row's values text and its vector text, if
@@ -161,15 +204,14 @@ fn parse_list(text: &str) -> Option<Intervals> {
         if RE_INT.is_match(item) {
             let n: i64 = item.parse().ok()?;
             out.push((n, n));
-        } else if let Some(c) = RE_SPAN.captures(item) {
+        } else {
+            let c = RE_SPAN.captures(item)?;
             let lo: i64 = c[1].parse().ok()?;
             let hi: i64 = c[2].parse().ok()?;
             if hi < lo {
                 return None;
             }
             out.push((lo, hi));
-        } else {
-            return None;
         }
     }
     if out.is_empty() {

@@ -4,8 +4,8 @@
 //! outside the documented values) and `sas-lint synthesize` (seed each
 //! input's value set). Both read the same `csv_paths` / `name_column` /
 //! `values_column` / `delimiter` / `name_match` options from the rule's
-//! config entry. `sas-lint check-catalog` (`src/catalog_check.rs`) reads
-//! them too, plus `vector_column`.
+//! config entry. `catalog_vector_mismatch` reads them too, plus
+//! `vector_column`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ pub struct SpecSource {
     pub name_column: String,
     pub values_column: String,
     /// The column that spells the acceptable values out one by one; read
-    /// only by `sas-lint check-catalog`.
+    /// only by `catalog_vector_mismatch`.
     pub vector_column: String,
     pub name_match: NameMatch,
     pub delimiter: u8,
