@@ -32,6 +32,7 @@ pub mod undefined_format;
 pub mod unescaped_quote_in_string;
 pub mod unreachable_else_if_branch;
 pub mod unreachable_inner_branch_value;
+pub mod unterminated_block_comment;
 pub mod unterminated_comment;
 pub mod variable_value_out_of_known_range;
 
@@ -67,6 +68,7 @@ pub fn all_metas() -> Vec<RuleMeta> {
         inconsistent_variable_case::meta(),
         format_for_unknown_variable::meta(),
         unterminated_comment::meta(),
+        unterminated_block_comment::meta(),
         unbalanced_do_block::meta(),
         unreachable_else_if_branch::meta(),
         proc_statement_missing_semicolon::meta(),

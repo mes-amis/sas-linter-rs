@@ -51,6 +51,11 @@ const PAIRS: &[(&str, &str)] = &[
     ("inconsistent_variable_case", "inconsistent_variable_case"),
     ("unterminated_comment", "unterminated_comment"),
     ("unterminated_comment", "unterminated_comment_star"),
+    ("unterminated_block_comment", "unterminated_block_comment"),
+    (
+        "unterminated_block_comment",
+        "unterminated_block_comment_close_typo",
+    ),
     ("source_headers", "source_headers"),
     ("unbalanced_do_block", "unbalanced_do_block"),
     ("unbalanced_do_block", "unbalanced_do_block_stray_end"),
